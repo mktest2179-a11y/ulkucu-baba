@@ -54,6 +54,13 @@ DEFAULT_CONFIG = {
         # implicit provider stale timeouts are capped to the remaining
         # budget. CLI one-shot equivalent: `hermes chat --run-budget N`.
         "run_budget_seconds": None,
+        # Optional per-run token spend ceiling (fresh tokens = non-cached
+        # input + output). null/absent/non-positive = guard fully off
+        # (zero behavior change). When set, the agent gets a one-time
+        # wrap-up notice at 80% and the tool loop stops before the next
+        # provider call once the ceiling is crossed. Env override:
+        # HERMES_TOKEN_SPEND_CEILING.
+        "token_spend_ceiling": None,
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has

@@ -2057,6 +2057,18 @@ def init_agent(
             _agent_section.get("run_budget_seconds")
         )
 
+    # Per-run token spend ceiling (agent.token_spend_ceiling). Only consulted
+    # when the constructor did not already set it. Absent/None/non-positive
+    # keeps the guard fully off. Env HERMES_TOKEN_SPEND_CEILING overrides
+    # this at check time (see conversation_loop).
+    if getattr(agent, "token_spend_ceiling", None) is None:
+        _tsc_raw = _agent_section.get("token_spend_ceiling")
+        try:
+            _tsc = int(_tsc_raw) if _tsc_raw is not None else 0
+        except (TypeError, ValueError):
+            _tsc = 0
+        agent.token_spend_ceiling = _tsc if _tsc > 0 else None
+
     # Empty-response retry guard config (NS-503): additive
     # ``agent.empty_response_guard`` subsection. Resolution is tolerant —
     # a malformed section falls back to the schema defaults (guard on,

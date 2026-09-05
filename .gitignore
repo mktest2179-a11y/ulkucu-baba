@@ -220,3 +220,9 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# Runtime state DB (created when HERMES_HOME resolves to the repo root, e.g.
+# running cli.py from here without HERMES_HOME set). Never a source artifact.
+state.db
+state.db-wal
+state.db-shm
