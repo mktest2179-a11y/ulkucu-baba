@@ -130,6 +130,20 @@ RUN_BUDGET_WRAPUP_NOTICE = (
 )
 
 
+# One-time wrap-up notice appended when the per-run token spend ceiling
+# (agent.token_spend_ceiling / env HERMES_TOKEN_SPEND_CEILING) crosses its
+# 80% threshold. Fresh-token accounting (non-cached input + output), same
+# "stop, deliver from current state" intent as the wall-clock budget notice
+# above.
+TOKEN_CEILING_WRAPUP_NOTICE = (
+    "[SYSTEM NOTICE — token spend ceiling nearly reached] "
+    "This run is close to its token spend ceiling. Stop new "
+    "discovery/verification work now. Produce the required final "
+    "deliverable (answer/JSON/summary) from the state you already have, "
+    "completing only mandatory writes."
+)
+
+
 def _midturn_request_pressure_tokens(
     agent: Any,
     api_messages: List[Dict[str, Any]],
@@ -193,6 +207,100 @@ def _review_input_budget_exhausted(agent: Any) -> bool:
         return False
     used = getattr(agent, "session_input_tokens", 0)
     return isinstance(used, int) and not isinstance(used, bool) and used >= budget
+
+
+def _resolve_token_spend_ceiling(agent: Any) -> Optional[int]:
+    """Resolve the per-run fresh-token ceiling, or None when the guard is off.
+
+    An env override (``HERMES_TOKEN_SPEND_CEILING``) wins so an operator can
+    cap a runaway run without editing config, then the config-resolved
+    ``agent.token_spend_ceiling``. Any non-positive or unparseable value
+    disables the guard (fail-open — zero behaviour change on the default
+    path).
+    """
+    raw = os.environ.get("HERMES_TOKEN_SPEND_CEILING")
+    if raw:
+        try:
+            val = int(str(raw).strip())
+        except (TypeError, ValueError):
+            val = 0
+        return val if val > 0 else None
+    val = getattr(agent, "token_spend_ceiling", None)
+    if isinstance(val, bool) or not isinstance(val, int):
+        return None
+    return val if val > 0 else None
+
+
+def _session_fresh_tokens(agent: Any) -> int:
+    """Fresh (non-cached) tokens burned this run: input + output.
+
+    ``session_input_tokens`` already EXCLUDES cache reads (CanonicalUsage
+    splits ``input_tokens`` from ``cache_read_tokens``), so this sum is the
+    non-cached spend — a cache-heavy transcript is not charged against the
+    ceiling on every turn. Do NOT subtract ``session_cache_read_tokens``
+    again: on a warm prompt cache that drives the figure negative and the
+    guard never fires.
+    """
+    got = 0
+    for name in ("session_input_tokens", "session_output_tokens"):
+        v = getattr(agent, name, 0)
+        if isinstance(v, int) and not isinstance(v, bool):
+            got += v
+    return max(0, got)
+
+
+def _token_spend_ceiling_exceeded(agent: Any) -> bool:
+    """True once this run's fresh-token spend has crossed its ceiling.
+
+    Checked at the top of the tool loop next to
+    :func:`_review_input_budget_exhausted`: the request that crossed the
+    ceiling has completed (its tool writes landed) and the loop stops before
+    the next provider call.
+    """
+    ceiling = _resolve_token_spend_ceiling(agent)
+    if ceiling is None:
+        return False
+    return _session_fresh_tokens(agent) > ceiling
+
+
+def _maybe_inject_token_ceiling_wrapup(agent: Any, messages: List[Dict[str, Any]]) -> bool:
+    """Inject the one-time wrap-up notice at 80% of the token spend ceiling.
+
+    Same cache-safe delivery as :func:`_maybe_inject_run_budget_wrapup`
+    (appended to the newest ``role:"tool"`` message, no synthetic user row,
+    prompt-cache prefix preserved). Latches
+    ``_token_ceiling_wrapup_injected`` only on a successful append. Dormant
+    unless a positive ceiling is resolved.
+    """
+    ceiling = _resolve_token_spend_ceiling(agent)
+    if ceiling is None:
+        return False
+    if getattr(agent, "_token_ceiling_wrapup_injected", False):
+        return False
+    if _session_fresh_tokens(agent) < 0.8 * float(ceiling):
+        return False
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "tool":
+            existing = msg.get("content", "")
+            if isinstance(existing, str):
+                msg["content"] = existing + f"\n\n{TOKEN_CEILING_WRAPUP_NOTICE}"
+            else:
+                try:
+                    blocks = list(existing) if existing else []
+                    blocks.append({"type": "text", "text": TOKEN_CEILING_WRAPUP_NOTICE})
+                    msg["content"] = blocks
+                except Exception:
+                    return False
+            agent._token_ceiling_wrapup_injected = True
+            logger.info(
+                "Token spend ceiling wrap-up notice injected "
+                "(ceiling=%d, fresh=%d)",
+                int(ceiling),
+                _session_fresh_tokens(agent),
+            )
+            return True
+    return False
 
 
 def _maybe_inject_run_budget_wrapup(agent: Any, messages: List[Dict[str, Any]]) -> bool:
@@ -2322,7 +2430,22 @@ def run_conversation(
                     f"the review tool loop before the next provider call."
                 )
             break
-        
+
+        # Per-run token spend ceiling. Fires between iterations, exactly like
+        # the review-input gate above: the request that crossed the ceiling
+        # completed and its tool writes landed; the loop stops before the
+        # next provider call. Dormant unless a positive ceiling is resolved
+        # from agent.token_spend_ceiling / HERMES_TOKEN_SPEND_CEILING.
+        if _token_spend_ceiling_exceeded(agent):
+            _turn_exit_reason = "token_spend_ceiling_exceeded"
+            if not agent.quiet_mode:
+                agent._safe_print(
+                    f"\n⏹️  Token spend ceiling reached "
+                    f"({_session_fresh_tokens(agent):,} fresh tokens) — "
+                    f"stopping the tool loop before the next provider call."
+                )
+            break
+
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
@@ -2431,6 +2554,10 @@ def run_conversation(
         # result); dormant when no budget is set.
         if getattr(agent, "run_budget_seconds", None):
             _maybe_inject_run_budget_wrapup(agent, messages)
+
+        # Token spend ceiling wrap-up: same one-shot 80% nudge, keyed on
+        # fresh-token spend instead of wall-clock. Dormant when no ceiling.
+        _maybe_inject_token_ceiling_wrapup(agent, messages)
 
         # Prepare messages for API call
         # If we have an ephemeral system prompt, prepend it to the messages
