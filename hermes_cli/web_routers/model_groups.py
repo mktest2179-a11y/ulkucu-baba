@@ -518,6 +518,23 @@ class OnayBody(BaseModel):
     karar: str = Field(..., pattern="^(approve|deny|onay|red|evet|hayir)$")
 
 
+class TeslimBody(BaseModel):
+    karar: str = Field(..., pattern="^(approve|reject|onay|red|evet|hayir)$")
+
+
+@router.post("/api/model-groups/gorev/{gid}/teslim")
+async def gorev_teslim(gid: str, body: TeslimBody) -> Dict[str, Any]:
+    """Teslim onay kapisı: kullanıcı sonucu inceledikten sonra verir.
+    approve -> görev 'bitti'; reject -> 'iptal' (devam akışı koşturulabilir)."""
+    from hermes_cli import mg_run
+
+    karar = "approve" if body.karar in {"approve", "onay", "evet"} else "reject"
+    ok = mg_run.teslim(gid.strip(), karar)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Görev yok ya da teslim beklemiyor")
+    return {"ok": True, "karar": karar}
+
+
 @router.post("/api/model-groups/gorev/{gid}/onay")
 async def gorev_onay(gid: str, body: OnayBody) -> Dict[str, Any]:
     from hermes_cli import mg_run
@@ -703,17 +720,19 @@ function railHtml(as){
 function gorevHtml(m){
   const r=m.rec||{},as=r.asamalar||[];
   const rows=as.map(s=>`<div class="st" data-s="${s.durum}"><span class="tg">${esc(s.no)}</span><span class="nm">${esc(s.ad)}</span><span class="dt">${esc(s.detay)}</span></div>`).join('')||'<div class="st" data-s="calisiyor"><span class="tg">.</span><span class="nm">basliyor</span></div>';
-  const canli=r.durum==='calisiyor', bekl=r.durum==='onay_bekliyor';
+  const canli=r.durum==='calisiyor', bekl=r.durum==='onay_bekliyor', tesl=r.durum==='teslim_bekliyor';
   let intv='';
   if(canli||bekl){
     let b=`<button class="bad" data-iptal="${m.gid}">x Iptal / Dur</button>`;
     if(bekl) b=`<button class="good" data-onay="${m.gid}">Onayla - ust kademeye gec</button><button class="bad" data-red="${m.gid}">Reddet - dur</button>`;
     intv=`<div class="${bekl?'onaybox':'intv'}"><div class="lbl">${bekl?'<span class="dot"></span>KADEME GECIS ONAYI BEKLIYOR':'MUDAHALE'}</div><div class="btns">${b}</div></div>`;
   }
-  const ans=(r.sonuc&&r.sonuc.cevap&&r.durum==='bitti')?`<div class="ans">${esc(r.sonuc.cevap)}</div>`:'';
+  else if(tesl) intv=`<div class="onaybox"><div class="lbl"><span class="dot"></span>TESLIM ONAYI BEKLIYOR - sonucu incele, kararinin</div><div class="btns"><button class="good" data-teslim="${m.gid},approve">&#10003; TESLIM ET</button><button class="bad" data-teslim="${m.gid},reject">&#10007; REDDET / GERI GONDER</button></div></div>`;
+  const ans=(r.sonuc&&r.sonuc.cevap&&(r.durum==='bitti'||r.durum==='teslim_bekliyor'))?`<div class="ans">${esc(r.sonuc.cevap)}</div>`:'';
   const devam=(r.durum==='iptal')?`<button class="ghost" data-devam="${m.gid}" style="margin-top:8px">&#8635; Kaldigi Yerden Devam</button>`:'';
-  const hata=r.durum==='hata'?`<div class="ans err">HATA: ${esc(r.hata||'hata')}</div>`:(r.durum==='iptal'?`<div class="ans err">x durduruldu</div>${devam}`:'');
-  const meta=[canli?'<span class="dot"></span>CALISIYOR':r.durum,(r.group?'['+r.group+']':''),r.sure||'',r.mesaj_sayisi||''].filter(Boolean).join(' - ');
+  const hata=r.durum==='hata'?`<div class="ans err">HATA: ${esc(r.hata||'hata')}</div>`:(r.durum==='iptal'?`<div class="ans err">x teslim edilmedi - reddedildi</div>${devam}`:'');
+  const dlabel={calisiyor:'<span class="dot"></span>CALISIYOR',teslim_bekliyor:'<span class="dot"></span>TESLIM BEKLIYOR'}[r.durum]||r.durum;
+  const meta=[dlabel,(r.group?'['+r.group+']':''),r.sure||'',r.mesaj_sayisi||''].filter(Boolean).join(' - ');
   return `<div class="who">hermes - ${meta}</div><div class="card">${railHtml(as)}<div class="flow">${rows}</div>${intv}${ans}${hata}</div>`;
 }
 function renderChat(){
@@ -730,6 +749,7 @@ async function pollGorev(m){
   for(let i=0;i<1200;i++){
     let r;try{r=await j('/api/model-groups/gorev/'+m.gid)}catch(x){await new Promise(s=>setTimeout(s,1500));continue}
     m.rec=r;renderChat();saveChat();
+    if(r.durum==='teslim_bekliyor'){$('#send').disabled=false;return}
     if(r.durum==='bitti'||r.durum==='hata'||r.durum==='iptal'){$('#send').disabled=false;
       HIST.unshift({title:(m.prompt||'').slice(0,44),preview:r.durum,chat:JSON.parse(JSON.stringify(CHAT))});HIST=HIST.slice(0,40);saveHist();renderHist();return}
     await new Promise(s=>setTimeout(s,1500));
@@ -757,8 +777,18 @@ $('#newChat').onclick=()=>{CHAT=[];saveChat();renderChat()};
 $('#clrHist').onclick=()=>{HIST=[];saveHist();renderHist()};
 $('#hist').addEventListener('click',e=>{const b=e.target.closest('[data-h]');if(!b)return;
   CHAT=JSON.parse(JSON.stringify(HIST[+b.dataset.h].chat));saveChat();renderChat()});
-$('#chat').addEventListener('click',async e=>{
-  const ip=e.target.closest('[data-iptal]'),on=e.target.closest('[data-onay]'),rd=e.target.closest('[data-red]'),dv=e.target.closest('[data-devam]');
+document.addEventListener('click',async e=>{
+  const ip=e.target.closest('[data-iptal]'),on=e.target.closest('[data-onay]'),rd=e.target.closest('[data-red]'),dv=e.target.closest('[data-devam]'),ts=e.target.closest('[data-teslim]');
+  if(ts){
+    const [gid,karar]=ts.dataset.teslim.split(',');
+    try{await j('/api/model-groups/gorev/'+gid+'/teslim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar})})}catch(x){}
+    const m=CHAT.find(x=>x.role==='gorev'&&x.gid===gid);
+    if(m&&m.rec){m.rec.durum=(karar==='approve')?'bitti':'iptal';
+      m.rec.asamalar=(m.rec.asamalar||[]).concat([{no:'!',ad:'TESLİM',durum:(karar==='approve')?'ok':'hata',detay:(karar==='approve')?'kullanıcı teslimi onayladı':'kullanıcı teslimi reddetti'}]);
+      $('#send').disabled=false;renderChat();saveChat();
+      HIST.unshift({title:(m.prompt||'').slice(0,44),preview:m.rec.durum,chat:JSON.parse(JSON.stringify(CHAT))});HIST=HIST.slice(0,40);saveHist();renderHist();}
+    return;
+  }
   if(ip){try{await j('/api/model-groups/gorev/'+ip.dataset.iptal+'/iptal',{method:'POST'})}catch(x){}}
   if(on){try{await j('/api/model-groups/gorev/'+on.dataset.onay+'/onay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar:'approve'})})}catch(x){}}
   if(rd){try{await j('/api/model-groups/gorev/'+rd.dataset.red+'/onay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar:'deny'})})}catch(x){}}
@@ -825,7 +855,7 @@ $('#fbApproval').addEventListener('change',async e=>{try{await j('/api/model-gro
 
 renderHist();renderChat();
 loadAll().catch(x=>gmsg('yuklenemedi: '+x.message,'err'));
-CHAT.filter(m=>m.role==='gorev'&&m.gid&&['calisiyor','onay_bekliyor'].includes((m.rec||{}).durum)).forEach(m=>pollGorev(m));
+CHAT.filter(m=>m.role==='gorev'&&m.gid&&['calisiyor','onay_bekliyor','teslim_bekliyor'].includes((m.rec||{}).durum)).forEach(m=>pollGorev(m));
 
 // ── kalici gorev kontrol cubugu ─────────────────────────────────────────
 // Son gorevin durumunu her zaman gorunur tutar: DURDUR / ONAYLA-RED /
@@ -840,14 +870,15 @@ function renderTaskbar(){
     return;
   }
   const r=m.rec||{}, d=r.durum;
-  const lbl={calisiyor:'<span class="dot"></span> GOREV CALISIYOR',onay_bekliyor:'<span class="dot"></span> ONAY BEKLIYOR',bitti:'BITTI',hata:'HATA',iptal:'DURDURULDU'}[d]||d||'';
+  const lbl={calisiyor:'<span class="dot"></span> GOREV CALISIYOR',onay_bekliyor:'<span class="dot"></span> ONAY BEKLIYOR',teslim_bekliyor:'<span class="dot"></span> TESLIM BEKLIYOR',bitti:'BITTI',hata:'HATA',iptal:'DURDURULDU'}[d]||d||'';
   const gidHtml='<span style="color:var(--faint);font-size:11px">#'+esc(m.gid)+'</span>';
   let btns='';
   if(d==='calisiyor') btns='<button class="bad" data-iptal="'+esc(m.gid)+'">■ DURDUR</button>';
   else if(d==='onay_bekliyor') btns='<button class="good" data-onay="'+esc(m.gid)+'">&#10003; ONAYLA</button><button class="bad" data-red="'+esc(m.gid)+'">&#10007; REDDET</button>';
+  else if(d==='teslim_bekliyor') btns='<button class="good" data-teslim="'+esc(m.gid)+',approve">&#10003; TESLIM ET</button><button class="bad" data-teslim="'+esc(m.gid)+',reject">&#10007; REDDET</button>';
   else if(d==='iptal') btns='<button class="ghost" data-devam="'+esc(m.gid)+'">&#8635; KALDIGI YERDEN DEVAM</button>';
   const barStyle='display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel)';
-  if(d==='calisiyor'||d==='onay_bekliyor'){ tb.style.display='block'; tb.innerHTML='<div style="'+barStyle+'"><span style="font-weight:700;font-size:12px;color:'+(d==='onay_bekliyor'?'var(--warn)':'var(--ok)')+'">'+lbl+'</span>'+gidHtml+'<span style="flex:1"></span>'+btns+'</div>'; }
+  if(d==='calisiyor'||d==='onay_bekliyor'||d==='teslim_bekliyor'){ tb.style.display='block'; tb.innerHTML='<div style="'+barStyle+'"><span style="font-weight:700;font-size:12px;color:'+(d==='onay_bekliyor'?'var(--warn)':'var(--ok)')+'">'+lbl+'</span>'+gidHtml+'<span style="flex:1"></span>'+btns+'</div>'; }
   else if(d==='iptal'){ tb.style.display='block'; tb.innerHTML='<div style="'+barStyle+'"><span style="font-weight:700;font-size:12px;color:var(--bad)">'+lbl+'</span>'+gidHtml+'<span style="flex:1"></span>'+btns+'</div>'; }
   else { // bitti / hata: sonucu goster ama kapatilabilir durumda
     tb.style.display='block'; tb.innerHTML='<div style="'+barStyle+'"><span style="font-weight:700;font-size:12px;color:'+(d==='hata'?'var(--bad)':'var(--dim)')+'">'+lbl+'</span>'+gidHtml+'<span style="flex:1"></span><span style="color:var(--faint);font-size:11px">yeni gorev verebilirsiniz</span></div>';
@@ -869,7 +900,7 @@ renderTaskbar();
     localStorage.setItem('mg_hist',JSON.stringify(HIST));
     renderHist();renderChat();
   }
-  CHAT.filter(m=>m.role==='gorev'&&m.gid&&['calisiyor','onay_bekliyor'].includes((m.rec||{}).durum)).forEach(m=>pollGorev(m));
+  CHAT.filter(m=>m.role==='gorev'&&m.gid&&['calisiyor','onay_bekliyor','teslim_bekliyor'].includes((m.rec||{}).durum)).forEach(m=>pollGorev(m));
 }catch(e){}})();
 
 // ── canli maliyet/token göstergesi ──────────────────────────────────────
