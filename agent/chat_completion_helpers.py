@@ -67,6 +67,51 @@ _PROVIDER_STREAM_ERROR_TEXT_LIMIT = 4096
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
 
 
+def _fallback_pre_approved() -> bool:
+    """True when the operator pre-authorised tier escalation for this run
+    via HERMES_FALLBACK_APPROVE (1/true/yes/on)."""
+    return str(os.environ.get("HERMES_FALLBACK_APPROVE", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _mg_wait_for_approval(cur: str, nxt: str, why: str, timeout: float = 600.0):
+    """Model Groups page live approval. Writes ``<ipc>/<gid>.pending`` and
+    polls ``<ipc>/<gid>.resp`` for 'approve'/'deny'. Returns 'approve',
+    'deny', or None (no mg session / timeout). Fail-open to None."""
+    gid = os.environ.get("HERMES_MG_GID")
+    ipc = os.environ.get("HERMES_MG_IPC")
+    if not gid or not ipc:
+        return None
+    try:
+        import json as _json
+        import pathlib
+        import time as _t
+
+        d = pathlib.Path(ipc)
+        d.mkdir(parents=True, exist_ok=True)
+        pend, resp = d / f"{gid}.pending", d / f"{gid}.resp"
+        try:
+            resp.unlink()
+        except Exception:
+            pass
+        pend.write_text(_json.dumps({"cur": cur, "nxt": nxt, "why": why}), encoding="utf-8")
+        deadline = _t.time() + timeout
+        while _t.time() < deadline:
+            if resp.exists():
+                ans = resp.read_text(encoding="utf-8").strip().lower()
+                try:
+                    pend.unlink()
+                    resp.unlink()
+                except Exception:
+                    pass
+                return "approve" if ans.startswith("approve") else "deny"
+            _t.sleep(1.0)
+    except Exception:
+        return None
+    return None
+
+
 def _context_thread_target(callback):
     """Bind a no-argument thread target to the caller's ContextVars."""
     context = contextvars.copy_context()
@@ -2738,6 +2783,38 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             )
         return False
     fb = agent._fallback_chain[agent._fallback_index]
+
+    # ── Fallback approval gate (agent.fallback_approval) ──────────────────
+    # When armed, do not auto-escalate to the next tier: stop the turn so the
+    # user decides. Pre-authorise a run with HERMES_FALLBACK_APPROVE=1. The
+    # recursive skip paths below (invalid entry / unavailable / same backend)
+    # re-enter this function, so the gate is re-checked per real switch.
+    if getattr(agent, "fallback_approval", False) and not _fallback_pre_approved():
+        _cur = f"{getattr(agent, 'provider', '?')}/{getattr(agent, 'model', '?')}"
+        _nxt = f"{(fb.get('provider') or '?')}/{(fb.get('model') or '?')}"
+        _why = getattr(reason, "value", None) or (str(reason) if reason else "yetersiz")
+        try:
+            agent._safe_print(
+                f"\n⏸️  Kademe yukseltme izni bekliyor — otomatik gecis yok.\n"
+                f"    Simdiki : {_cur}\n"
+                f"    Sirada  : {_nxt}\n"
+                f"    Neden   : {_why}"
+            )
+        except Exception:
+            pass
+        logger.info(
+            "fallback_approval: escalation to %s held (reason=%s)", _nxt, _why
+        )
+        # Model Groups page (hermes mg): block on an IPC file so the UI can
+        # answer live with [Onayla]/[Reddet] instead of the run just ending.
+        _mg_karar = _mg_wait_for_approval(_cur, _nxt, _why)
+        if _mg_karar == "approve":
+            pass  # fall through -> advance the chain below
+        elif _mg_karar is None:
+            return False  # no mg session (normal CLI) or timeout -> hold
+        else:
+            return False  # explicit deny
+
     agent._fallback_index += 1
     fb_key = _fallback_entry_key(fb)
     unavailable = getattr(agent, "_unavailable_fallback_keys", None)

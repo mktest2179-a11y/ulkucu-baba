@@ -11208,6 +11208,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "uninstall",
         "profile",
         "dashboard",
+        "mg",
         "serve",
         "desktop",
         "gui",
@@ -13753,6 +13754,36 @@ def main():
         return 1
 
     browser_parser.set_defaults(func=_dispatch_browser)
+
+
+    # =========================================================================
+    # mg command — local Model Groups page (no React build, no auth gate)
+    # =========================================================================
+    mg_parser = subparsers.add_parser(
+        "mg",
+        help="Model Grupları sayfasını yerel olarak aç (127.0.0.1, auth yok)",
+        description=(
+            "Model kataloğu + sıralı kademe grupları + model başına rol "
+            "etiketi + seçilen grupla prompt koşturan sohbet kutusu. "
+            "hermes dashboard'dan farklı olarak React build ve auth gate "
+            "yoktur — 127.0.0.1'e bağlıdır, tek güvenilir yerel kullanıcı "
+            "içindir. Çalışırken herhangi bir yerel süreç erişebilir."
+        ),
+    )
+    mg_parser.add_argument("--port", type=int, default=9140, help="Port (varsayılan 9140)")
+    mg_parser.add_argument("--host", default="127.0.0.1", help="Host (varsayılan 127.0.0.1)")
+    mg_parser.add_argument("--no-open", action="store_true", help="Tarayıcıyı otomatik açma")
+
+    def _dispatch_mg(_args):
+        from hermes_cli.mg_server import run_server
+
+        return run_server(
+            getattr(_args, "host", "127.0.0.1"),
+            int(getattr(_args, "port", 9140)),
+            open_browser=not getattr(_args, "no_open", False),
+        )
+
+    mg_parser.set_defaults(func=_dispatch_mg)
 
 
     # =========================================================================

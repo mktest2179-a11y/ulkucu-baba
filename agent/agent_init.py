@@ -2069,6 +2069,40 @@ def init_agent(
             _tsc = 0
         agent.token_spend_ceiling = _tsc if _tsc > 0 else None
 
+    # Per-run estimated-cost ceiling (agent.cost_spend_ceiling_usd) — the
+    # dollar mirror of the token spend ceiling above. Same fail-open posture:
+    # absent/None/non-positive keeps the guard fully off; env
+    # HERMES_COST_SPEND_CEILING_USD overrides at check time.
+    if getattr(agent, "cost_spend_ceiling_usd", None) is None:
+        _csc_raw = _agent_section.get("cost_spend_ceiling_usd")
+        try:
+            _csc = float(_csc_raw) if _csc_raw is not None else 0.0
+        except (TypeError, ValueError):
+            _csc = 0.0
+        agent.cost_spend_ceiling_usd = _csc if _csc > 0 else None
+
+    # Operator pricing table (root ``pricing:`` section) — prices custom
+    # models that ship no /models metadata so session_estimated_cost_usd
+    # (and therefore the cost ceiling above) reflects real spend instead of
+    # 0.0. Additive: an invalid/absent section leaves usage_pricing's
+    # bundled tables untouched.
+    try:
+        from agent.usage_pricing import set_config_pricing
+
+        set_config_pricing(_agent_cfg.get("pricing"))
+    except Exception:
+        logger.debug(
+            "config pricing: table install failed; bundled pricing only",
+            exc_info=True,
+        )
+
+    # Fallback approval gate (agent.fallback_approval). When true, the model
+    # cascade does NOT auto-advance to the next fallback tier — the turn
+    # stops so the user decides whether to escalate. Env HERMES_FALLBACK_APPROVE=1
+    # pre-authorises escalation for a run (see chat_completion_helpers).
+    if getattr(agent, "fallback_approval", None) is None:
+        agent.fallback_approval = bool(_agent_section.get("fallback_approval", False))
+
     # Empty-response retry guard config (NS-503): additive
     # ``agent.empty_response_guard`` subsection. Resolution is tolerant —
     # a malformed section falls back to the schema defaults (guard on,

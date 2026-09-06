@@ -331,7 +331,13 @@ def run_oneshot(
         return 2
 
     if not (response or "").strip():
-        real_stderr.write("hermes -z: no final response was produced; treating the run as failed.\n")
+        # Surface WHY the loop ended when it is known (cost/token ceilings,
+        # budget exhaustion, interruption...) — oneshot silences agent
+        # logging, so without this a ceiling stop looks like a mystery
+        # "no final response" failure.
+        _exit_reason = result.get("turn_exit_reason")
+        _reason_note = f" (reason: {_exit_reason})" if _exit_reason and _exit_reason != "unknown" else ""
+        real_stderr.write(f"hermes -z: no final response was produced{_reason_note}; treating the run as failed.\n")
         real_stderr.flush()
         return 1
 

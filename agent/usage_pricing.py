@@ -1260,6 +1260,65 @@ def _pricing_entry_from_metadata(
     )
 
 
+# ── Config-supplied pricing table (custom providers) ─────────────────────
+# Populated from the optional ``pricing:`` config section so operators can
+# price models that ship no /models metadata (e.g. custom OpenAI-compatible
+# aggregators). Additive to the bundled tables: an exact model-name match
+# here takes precedence over official-docs / endpoint-metadata lookups so
+# an operator can override a published rate too. Empty table = zero change
+# to the default resolution order.
+_CONFIG_PRICING: Dict[str, Dict[str, Any]] = {}
+
+
+def set_config_pricing(table: Any) -> None:
+    """Install the ``pricing:`` config table (model -> rate dict). Idempotent;
+    an invalid/empty table clears overrides so the guard fails open."""
+    global _CONFIG_PRICING
+    if not isinstance(table, dict):
+        _CONFIG_PRICING = {}
+        return
+    _CONFIG_PRICING = {str(k): v for k, v in table.items() if isinstance(v, dict)}
+
+
+def _config_pricing_entry(route: "BillingRoute") -> Optional[PricingEntry]:
+    """Exact-name lookup in the config table, -> :class:`PricingEntry`.
+
+    Keys match the model slug as written in config (``provider/model``).
+    Missing rate fields stay None — estimate_usage_cost treats None rates
+    as unknown, so a partially-priced model still fails honestly instead of
+    silently pricing to $0.
+    """
+    raw = _CONFIG_PRICING.get(route.model)
+    if raw is None:
+        return None
+
+    def _rate(key: str) -> Optional[Decimal]:
+        v = raw.get(key)
+        try:
+            return _to_decimal(v) if v is not None else None
+        except Exception:
+            return None
+
+    entry = PricingEntry(
+        input_cost_per_million=_rate("input_cost_per_million"),
+        output_cost_per_million=_rate("output_cost_per_million"),
+        cache_read_cost_per_million=_rate("cache_read_cost_per_million"),
+        cache_write_cost_per_million=_rate("cache_write_cost_per_million"),
+        request_cost=_rate("request_cost"),
+        source="config",
+        pricing_version="operator-config",
+    )
+    if (
+        entry.input_cost_per_million is None
+        and entry.output_cost_per_million is None
+        and entry.cache_read_cost_per_million is None
+        and entry.cache_write_cost_per_million is None
+        and entry.request_cost is None
+    ):
+        return None
+    return entry
+
+
 def get_pricing_entry(
     model_name: str,
     provider: Optional[str] = None,
@@ -1278,6 +1337,12 @@ def get_pricing_entry(
         )
     if route.provider == "openrouter":
         return _openrouter_pricing_entry(route)
+
+    # Operator-supplied rates win over bundled docs / endpoint metadata so a
+    # custom aggregator model can be priced (and mispriced defaults fixed).
+    cfg_entry = _config_pricing_entry(route)
+    if cfg_entry:
+        return cfg_entry
 
     bundled_entry = _lookup_official_docs_pricing(route)
     if bundled_entry:
