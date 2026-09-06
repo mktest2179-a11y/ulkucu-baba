@@ -1,3 +1,73 @@
+<div align="center">
+
+## 🧩 Kişisel Fork — Personal Fork
+
+</div>
+
+<details open>
+<summary><b>🇹🇷 Türkçe — Bu depo nedir?</b></summary>
+
+<br>
+
+Merhaba! Ben kodlama hakkında pek bilgisi olmayan, "dene ve yanıl" yöntemiyle çalışan biriyim.
+Bu depo, açık kaynak **[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** projesinin kişisel bir kopyasıdır
+ve üzerine **Claude Code (Anthropic), OpenAI Codex ve Z.ai (GLM) ajanlarıyla**, adım adım konuşarak geliştirdiğim katmanları içerir.
+
+### Bu fork'un ekledikleri
+
+- 🖥️ **`hermes mg` — Model Grupları sayfası:** tarayıcıda çalışan yerel bir panel (127.0.0.1:9140). Model kataloğu, sıralı
+  "kademe" (fallback) grupları kurma, canlı görev akışı izleme (hangi aracın çalıştığını tek tek görme), görevi durdurma/yarım
+  kaldığı yerden devam ettirme ve günlük token/maliyet göstergesi.
+- 💸 **Oturum başına maliyet tavanı:** `agent.cost_spend_ceiling_usd` ile bir koşunun USD olarak harcama tavanı konur;
+  özel/aggregator modeller için `pricing:` tablosu ile gerçek fiyat girilir. Tavan aşılınca döngü bir sonraki API çağrısından
+  önce durur.
+- ⛔ **Kademe onay kapısı (`fallback_approval`):** bir model hata verip bir üst kademeye geçilecekse ajan otomatik geçmez —
+  ekranda ya da mg sayfasında [Onayla]/[Reddet] sorar. `HERMES_FALLBACK_APPROVE=1` ile tek koşuya izin verilebilir.
+
+### Hermes Agent zaten neler yapabilir? (upstream)
+
+- 💻 Terminal/kabuk komutları, dosya okuma-yazma, kod düzenleme
+- 🌐 Web arama, tarayıcı otomasyonu, sayfa okuma
+- ⏰ Cron ile zamanlanmış görevler, kanban görev panosu, yetki devri (delegation)
+- 💬 Telegram/Discord/WhatsApp/Slack/Signal gibi platformlardan mesajlaşma entegrasyonları
+- 🧠 Hafıza/oturum kalıcılığı (SQLite), beceri (skill) sistemi, MCP sunucu desteği
+- 🎙️ Sesli komut (Whisper STT), görsel üretimi, dashboard arayüzü
+
+> ⚠️ Bu bir **amatör, başlangıç aşamasında** kişisel projedir — hatalar olabilir, her şey kendi bilgisayarımda çalışır.
+> Öneri, düzeltme ve destek için **issue/PR açmaktan çekinmeyin!** 🙏
+
+</details>
+
+<details open>
+<summary><b>🇬🇧 English — What is this repo?</b></summary>
+
+<br>
+
+Hi! I am a beginner with little coding background, building things by **trial and error together with AI agents**
+(Claude Code, OpenAI Codex, and Z.ai GLM). This is a personal fork of the open-source
+**[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** with my own layer added on top:
+
+- 🖥️ **`hermes mg` — a local "Model Groups" page:** a loopback web panel (127.0.0.1:9140) with a model catalog, ordered
+  fallback/cascade groups, live task tracking (watch every tool call stream in), stop/resume, and a daily token/cost chip.
+- 💸 **Per-run cost ceiling:** `agent.cost_spend_ceiling_usd` caps a run in USD, with an operator `pricing:` table so custom
+  aggregator models get real prices. Once crossed, the tool loop stops before the next API call.
+- ⛔ **Fallback approval gate (`fallback_approval`):** the agent will not silently escalate to the next model tier — it asks
+  via the CLI or the mg page ([Approve]/[Deny]). `HERMES_FALLBACK_APPROVE=1` pre-authorises a single run.
+
+### What the upstream agent can do
+
+Terminal/shell commands, file editing, web search & browser automation, cron jobs, kanban boards, messaging-platform
+integrations (Telegram/Discord/WhatsApp/Slack/Signal), persistent memory (SQLite), a skill system, MCP servers,
+speech-to-text, image generation, and a dashboard.
+
+> ⚠️ Amateur, early-stage personal project — bugs are likely, everything runs on my own machine.
+> **Issues and PRs with suggestions or fixes are very welcome!** 🙏
+
+</details>
+
+---
+
+<!-- upstream README follows -->
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
