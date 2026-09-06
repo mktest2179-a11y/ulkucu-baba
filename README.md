@@ -9,7 +9,7 @@
 
 <br>
 
-Merhaba! Ben kodlama hakkında pek bilgisi olmayan, "dene ve yanıl" yöntemiyle çalışan biriyim.
+Merhaba! Ben kodlama hakkında pek bilgisi olmayan, deneme ve yanılma yöntemiyle çalışan biriyim.
 Bu depo, açık kaynak **[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** projesinin kişisel bir kopyasıdır
 ve üzerine **Claude Code (Anthropic), OpenAI Codex ve Z.ai (GLM) ajanlarıyla**, adım adım konuşarak geliştirdiğim katmanları içerir.
 
