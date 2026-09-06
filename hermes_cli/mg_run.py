@@ -135,7 +135,10 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
             elif rec.get("hata") or (proc.returncode not in (0, None)):
                 rec["durum"] = "hata"
             elif rec["durum"] != "iptal":
-                rec["durum"] = "bitti"
+                # Teslim onay kapisı: görev başarılı bittiğinde otomatik
+                # "bitti" yazılmaz — kullanıcı mg sayfasında sonucu inceleyip
+                # [TESLIM ET]/[REDDET] ile kararı verir (bkz. teslim()).
+                rec["durum"] = "teslim_bekliyor"
             rec["bitti_at"] = time.time()
 
 
@@ -229,6 +232,23 @@ def respond(gid: str, karar: str) -> bool:
         # denied escalation → the gate returns False and the run ends; also
         # nudge the process if it lingers
         threading.Thread(target=lambda: (time.sleep(20), cancel(gid)), daemon=True).start()
+    return True
+
+
+def teslim(gid: str, karar: str) -> bool:
+    """UI's delivery decision on a 'teslim_bekliyor' task:
+    'approve' -> durum 'bitti'; 'reject' -> durum 'iptal' (Kaldigi Yerden
+    Devam akışı yeniden koşturabilir)."""
+    gid = gid.strip()
+    with _LOCK:
+        rec = _TASKS.get(gid)
+        if rec is None or rec.get("durum") != "teslim_bekliyor":
+            return False
+        ok = karar.strip().lower() in {"approve", "onay", "evet", "yes", "1"}
+        rec["durum"] = "bitti" if ok else "iptal"
+        _add_stage(rec, "!", "TESLİM", "ok" if ok else "hata",
+                   "kullanıcı teslimi onayladı" if ok else "kullanıcı teslimi reddetti")
+        rec.pop("onay_tipi", None)
     return True
 
 
