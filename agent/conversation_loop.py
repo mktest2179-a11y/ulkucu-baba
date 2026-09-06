@@ -263,6 +263,49 @@ def _token_spend_ceiling_exceeded(agent: Any) -> bool:
     return _session_fresh_tokens(agent) > ceiling
 
 
+def _resolve_cost_spend_ceiling(agent: Any) -> Optional[float]:
+    """Resolve the per-run estimated-cost ceiling (USD), or None when off.
+
+    Dollar mirror of :func:`_resolve_token_spend_ceiling`: env
+    ``HERMES_COST_SPEND_CEILING_USD`` wins, then config-resolved
+    ``agent.cost_spend_ceiling_usd``. Any non-positive/unparseable value
+    disables the guard (fail-open — zero behaviour change by default).
+    """
+    raw = os.environ.get("HERMES_COST_SPEND_CEILING_USD")
+    if raw:
+        try:
+            val = float(str(raw).strip())
+        except (TypeError, ValueError):
+            val = 0.0
+        return val if val > 0 else None
+    val = getattr(agent, "cost_spend_ceiling_usd", None)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    return float(val) if val > 0 else None
+
+
+def _cost_spend_ceiling_exceeded(agent: Any) -> bool:
+    """True once this run's accumulated estimated cost has crossed its ceiling.
+
+    Reads ``agent.session_estimated_cost_usd`` — the figure the turn loop
+    already accumulates from provider usage after every response (MoA
+    advisor costs included; custom models contribute only when the operator
+    prices them via the ``pricing:`` config table). Like the token ceiling,
+    checked at the top of the tool loop: the request that crossed has
+    completed (its tool writes landed) and the loop stops before the next
+    provider call — one overshooting turn is admitted by design.
+    """
+    ceiling = _resolve_cost_spend_ceiling(agent)
+    if ceiling is None:
+        return False
+    used = getattr(agent, "session_estimated_cost_usd", 0.0)
+    try:
+        used_f = float(used)
+    except (TypeError, ValueError):
+        return False
+    return used_f > ceiling
+
+
 def _maybe_inject_token_ceiling_wrapup(agent: Any, messages: List[Dict[str, Any]]) -> bool:
     """Inject the one-time wrap-up notice at 80% of the token spend ceiling.
 
@@ -2444,6 +2487,37 @@ def run_conversation(
                     f"({_session_fresh_tokens(agent):,} fresh tokens) — "
                     f"stopping the tool loop before the next provider call."
                 )
+            break
+
+        # Per-run estimated-cost ceiling (dollar mirror of the token guard
+        # above). Fires between iterations: the request that crossed the
+        # ceiling completed and its tool writes landed; the loop stops
+        # before the next provider call. Dormant unless a positive ceiling
+        # is resolved from agent.cost_spend_ceiling_usd /
+        # HERMES_COST_SPEND_CEILING_USD, and only bites once custom models
+        # are priced (pricing: config section) — unpriced models accumulate
+        # 0.0 and can never cross.
+        if _cost_spend_ceiling_exceeded(agent):
+            _turn_exit_reason = "cost_spend_ceiling_exceeded"
+            _cost_used = getattr(agent, "session_estimated_cost_usd", 0.0)
+            _cost_msg = (
+                f"Estimated-cost ceiling reached (${float(_cost_used):.4f} "
+                f"accumulated, ceiling ${float(_resolve_cost_spend_ceiling(agent) or 0.0):.2f})"
+                f" — stopping the tool loop before the next provider call."
+            )
+            # Safety events must be observable on every path: oneshot runs the
+            # agent with quiet_mode=True (console print suppressed) and some
+            # CLI invocations never reach the file logs, so surface this on
+            # stderr unconditionally in addition to the logger.
+            logger.warning("Cost spend ceiling reached: %s", _cost_msg)
+            try:
+                import sys as _sys
+
+                print(f"\n⏹️  {_cost_msg}", file=_sys.stderr)
+            except Exception:
+                pass
+            if not agent.quiet_mode:
+                agent._safe_print(f"\n⏹️  {_cost_msg}")
             break
 
         api_call_count += 1

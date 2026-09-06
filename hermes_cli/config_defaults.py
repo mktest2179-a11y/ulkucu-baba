@@ -61,6 +61,19 @@ DEFAULT_CONFIG = {
         # provider call once the ceiling is crossed. Env override:
         # HERMES_TOKEN_SPEND_CEILING.
         "token_spend_ceiling": None,
+        # Optional per-run estimated-cost ceiling in USD. null/absent/
+        # non-positive = guard fully off. When set, the tool loop stops
+        # before the next provider call once this run's accumulated
+        # session_estimated_cost_usd crosses it (one overshooting turn is
+        # admitted, like the token ceiling). Only bites once custom models
+        # are priced via the root `pricing:` section — unpriced models
+        # accumulate 0.0 and never trip. Env: HERMES_COST_SPEND_CEILING_USD.
+        "cost_spend_ceiling_usd": None,
+        # When true, the model fallback cascade does NOT auto-advance to the
+        # next tier: the turn stops so the user decides whether to escalate.
+        # false/absent = current behavior (silent auto-failover). Env
+        # HERMES_FALLBACK_APPROVE=1 pre-authorises escalation for one run.
+        "fallback_approval": False,
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has
