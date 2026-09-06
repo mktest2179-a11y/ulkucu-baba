@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/ulkucu-baba.jpg" alt="Ülkücü Baba" width="60%">
+
 ## 🧩 Kişisel Fork — Personal Fork
 
 </div>
