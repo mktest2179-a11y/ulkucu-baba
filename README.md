@@ -26,6 +26,51 @@ ve üzerine **Claude Code (Anthropic), OpenAI Codex ve Z.ai (GLM) ajanlarıyla**
 - ⛔ **Kademe onay kapısı (`fallback_approval`):** bir model hata verip bir üst kademeye geçilecekse ajan otomatik geçmez —
   ekranda ya da mg sayfasında [Onayla]/[Reddet] sorar. `HERMES_FALLBACK_APPROVE=1` ile tek koşuya izin verilebilir.
 
+### Bu fork'u kurma
+
+> Bu adımlar fork'u **kaynaktan** kurar. Sadece upstream Hermes'i istiyorsanız sayfanın altındaki **Quick Install**'u kullanın.
+>
+> **Gereksinimler:** Git · Python 3.11 · Node.js 18+ (panel arayüzü için) · [uv](https://docs.astral.sh/uv/)
+
+**Linux / macOS / WSL2:**
+
+```bash
+git clone https://github.com/mktest2179-a11y/ulkucu-baba.git
+cd ulkucu-baba
+uv venv .venv --python 3.11
+source .venv/bin/activate
+uv pip install -e ".[all]"
+hermes                      # sohbeti başlat
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/mktest2179-a11y/ulkucu-baba.git
+cd ulkucu-baba
+uv venv .venv --python 3.11
+.\.venv\Scripts\Activate.ps1
+uv pip install -e ".[all]"
+hermes
+```
+
+**Fork'a özel ayarlar:**
+
+```bash
+hermes model                                          # sağlayıcı + model seç
+hermes config set agent.cost_spend_ceiling_usd 0.5    # koşu başına USD tavanı
+hermes config set agent.fallback_approval true        # kademe onay kapısı
+hermes mg                                             # Model Grupları paneli → http://127.0.0.1:9140
+```
+
+Güncelleme: bu fork upstream'den ayrık ilerler. `hermes update` bu fork'ta çalışmaz; upstream'i çekmek için:
+
+```bash
+git remote add upstream https://github.com/NousResearch/hermes-agent.git
+git fetch upstream && git merge upstream/main   # çakışmaları elle çözün
+uv pip install -e ".[all]"                      # bağımlılıklar değişmiş olabilir
+```
+
 ### Hermes Agent zaten neler yapabilir? (upstream)
 
 - 💻 Terminal/kabuk komutları, dosya okuma-yazma, kod düzenleme
@@ -55,6 +100,51 @@ Hi! I am a beginner with little coding background, building things by **trial an
   aggregator models get real prices. Once crossed, the tool loop stops before the next API call.
 - ⛔ **Fallback approval gate (`fallback_approval`):** the agent will not silently escalate to the next model tier — it asks
   via the CLI or the mg page ([Approve]/[Deny]). `HERMES_FALLBACK_APPROVE=1` pre-authorises a single run.
+
+### Installing this fork
+
+> These steps install the fork **from source**. If you only want upstream Hermes, use **Quick Install** further down.
+>
+> **Requirements:** Git · Python 3.11 · Node.js 18+ (for the panel UI) · [uv](https://docs.astral.sh/uv/)
+
+**Linux / macOS / WSL2:**
+
+```bash
+git clone https://github.com/mktest2179-a11y/ulkucu-baba.git
+cd ulkucu-baba
+uv venv .venv --python 3.11
+source .venv/bin/activate
+uv pip install -e ".[all]"
+hermes                      # start chatting
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/mktest2179-a11y/ulkucu-baba.git
+cd ulkucu-baba
+uv venv .venv --python 3.11
+.\.venv\Scripts\Activate.ps1
+uv pip install -e ".[all]"
+hermes
+```
+
+**Fork-specific setup:**
+
+```bash
+hermes model                                          # pick provider + model
+hermes config set agent.cost_spend_ceiling_usd 0.5    # per-run USD ceiling
+hermes config set agent.fallback_approval true        # fallback approval gate
+hermes mg                                             # Model Groups panel → http://127.0.0.1:9140
+```
+
+Updating: this fork diverges from upstream, so `hermes update` does not work here. To pull upstream:
+
+```bash
+git remote add upstream https://github.com/NousResearch/hermes-agent.git
+git fetch upstream && git merge upstream/main   # resolve conflicts by hand
+uv pip install -e ".[all]"                      # deps may have changed
+```
 
 ### What the upstream agent can do
 
