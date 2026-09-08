@@ -31,7 +31,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -421,6 +421,30 @@ async def sohbet_post(body: SohbetBody) -> Dict[str, Any]:
     return await run_in_threadpool(_run)
 
 
+@router.post("/api/model-groups/dosya-yukle")
+async def dosya_yukle(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Sohbete harici dosya ekleme: HERMES_HOME/girdiler/ altına kaydeder."""
+    def _run() -> Dict[str, Any]:
+        try:
+            from hermes_constants import get_hermes_home
+            base = Path(get_hermes_home()) / "girdiler"
+            base.mkdir(exist_ok=True)
+            name = Path(file.filename or "dosya").name.strip().replace(" ", "_")
+            if not name or name.startswith("."):
+                return {"ok": False, "reason": "gecersiz dosya adi"}
+            dest = base / name
+            i = 1
+            while dest.exists():
+                dest = base / f"{Path(name).stem}_{i}{Path(name).suffix}"
+                i += 1
+            dest.write_bytes(file.file.read())
+            rel = f"girdiler/{dest.name}"
+            return {"ok": True, "path": rel, "size": dest.stat().st_size}
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc)[:160]}
+    return await run_in_threadpool(_run)
+
+
 @router.get("/api/model-groups/catalog")
 async def catalog(refresh: bool = False, profile: Optional[str] = None, all: bool = False) -> Dict[str, Any]:
     pf = _norm_profile(profile)
@@ -462,6 +486,8 @@ class GorevBody(BaseModel):
     # için önceden geçer (HERMES_FALLBACK_APPROVE=1). Kapıyı KURMAK için değil,
     # bu koşuda BYPASS etmek için. Sayfa göndermez; canlı onay /onay ucuyla.
     auto_escalate: bool = False
+    # Görevin çalışacağı klasör (boşsa HERMES_HOME). Sohbet ekranından seçilir.
+    cwd: Optional[str] = None
 
 
 @router.post("/api/model-groups/gorev")
@@ -485,9 +511,13 @@ async def gorev_baslat(body: GorevBody) -> Dict[str, Any]:
                 data["groups"][grp] = models
                 _save(data)
             activated = grp
+        run_cwd = (body.cwd or "").strip() or None
+        if run_cwd:
+            if not Path(run_cwd).is_dir():
+                raise HTTPException(status_code=400, detail=f"Klasör yok: {run_cwd}")
         gid = mg_run.start(
             prompt, group=grp or None, profile=pf,
-            auto_escalate=bool(body.auto_escalate),
+            auto_escalate=bool(body.auto_escalate), cwd=run_cwd,
         )
         return {"ok": True, "gorev_id": gid, "profile": pf, "activated_group": activated}
 
@@ -654,10 +684,18 @@ input.role{width:88px;padding:4px 6px;font-size:12px;margin-right:4px}
     <div class="inbar"><div class="wrap2">
       <div class="inmeta"><span>bu mesajin mimarisi:</span>
         <select id="chatGroup"><option value="">(aktif grup)</option></select>
-        <span id="chatInfo"></span></div>
+        <span id="chatInfo"></span>
+        <span style="margin-left:12px">calisma klasoru:</span>
+        <input id="cwdInput" type="text" placeholder="D:\Hermes (varsayilan)" style="max-width:280px;padding:4px 8px">
+      </div>
       <div class="inrow" style="margin-top:6px">
         <textarea id="prompt" placeholder="prompt yaz... (Ctrl+Enter gonderir)"></textarea>
-        <button id="send">Gonder</button>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button id="dosyaBtn" class="ghost" title="Dosya ekle (girdiler klasorune kaydedilir)">📎 Dosya</button>
+          <input type="file" id="dosyaInput" style="display:none">
+          <button id="klasorBtn" class="ghost" title="Bu gorevin calisacagi klasoru sec">📂 Klasör</button>
+          <button id="send">Gonder</button>
+        </div>
       </div>
     </div></div>
   </main>
@@ -690,7 +728,9 @@ input.role{width:88px;padding:4px 6px;font-size:12px;margin-right:4px}
 <script>
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||r.status);return r.json()}
+const _TOK=(typeof window!=='undefined'&&window.__HERMES_SESSION_TOKEN__)||'';
+async function j(u,o){o=o||{};if(_TOK){o.headers=Object.assign({'X-Hermes-Session-Token':_TOK},o.headers||{})}
+  const r=await fetch(u,o);if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||r.status);return r.json()}
 const q=p=>'?profile='+encodeURIComponent(p);
 let PF='current', CAT=[], CHOSEN=[], DATA={groups:{},active:''};
 let CHAT=JSON.parse(localStorage.getItem('mg_chat')||'[]');
@@ -766,12 +806,32 @@ async function send(opts){
   CHAT.push(m);renderChat();saveChat();
   try{
     const r=await j('/api/model-groups/gorev',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({prompt:p,group:g||null,profile:PF})});
+      body:JSON.stringify({prompt:p,group:g||null,profile:PF,cwd:$('#cwdInput').value.trim()||null})});
     m.gid=r.gorev_id;if(r.activated_group)loadForProfile();
     await pollGorev(m);
   }catch(x){m.rec={durum:'hata',asamalar:[],hata:x.message};renderChat();saveChat();$('#send').disabled=false}
 }
 $('#send').onclick=()=>send();
+$('#dosyaBtn').onclick=()=>$('#dosyaInput').click();
+$('#dosyaInput').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const fd=new FormData();fd.append('file',f);
+  try{
+    const r=await j('/api/model-groups/dosya-yukle',{method:'POST',body:fd});
+    if(r.ok){const ta=$('#prompt');
+      ta.value=(ta.value?ta.value+' ':'')+'['+r.path+'] ekli dosyayi incele';
+    }else{alert('Dosya yuklenemedi: '+(r.reason||'?'))}
+  }catch(x){alert('Dosya yuklenemedi: '+x.message)}
+  e.target.value='';
+};
+$('#klasorBtn').onclick=()=>{
+  const mevcut=$('#cwdInput').value.trim();
+  const v=prompt('Bu gorevin calisma klasoru (bos = D:\\Hermes):',mevcut||'');
+  if(v===null)return;
+  const t=v.trim();
+  $('#cwdInput').value=t;
+  $('#klasorBtn').textContent=t?'📂 '+t.split(/[\\/]/).pop():'📂 Klasör';
+};
 $('#prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();send()}});
 $('#newChat').onclick=()=>{CHAT=[];saveChat();renderChat()};
 $('#clrHist').onclick=()=>{HIST=[];saveHist();renderHist()};
@@ -926,9 +986,28 @@ loadKullanim(); setInterval(loadKullanim,15000);
 async def page() -> HTMLResponse:
     # no-store: sayfa tek dosyalik canli panel; eski kodun onbellekten
     # gelmesi ("degisen bir sey yok" sikayeti) yasaklanir.
-    return HTMLResponse(_PAGE, headers={"Cache-Control": "no-store, must-revalidate"})
+    return HTMLResponse(_mg_page_html(), headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 @router.get("/mg", response_class=HTMLResponse)
 async def page_short() -> HTMLResponse:
-    return HTMLResponse(_PAGE, headers={"Cache-Control": "no-store, must-revalidate"})
+    return HTMLResponse(_mg_page_html(), headers={"Cache-Control": "no-store, must-revalidate"})
+
+
+def _mg_page_html() -> str:
+    """Sayfa HTML'ine oturum token'ını enjekte eder.
+
+    Dashboard (9119) üzerinden servis edildiğinde /api/* uçları token ister;
+    SPA kendi HTML'ine gömülü token'ı yolluyor ama mg sayfası ayrı HTML
+    olduğu için ona da gömmek gerekir, yoksa dosya yükleme vb. 401 yer.
+    """
+    try:
+        from hermes_cli import web_server as _ws
+
+        tok = getattr(_ws, "_SESSION_TOKEN", "")
+        if tok:
+            head = f'<script>window.__HERMES_SESSION_TOKEN__="{tok}";</script>'
+            return _PAGE.replace("<head>", "<head>" + head, 1)
+    except Exception:
+        pass
+    return _PAGE

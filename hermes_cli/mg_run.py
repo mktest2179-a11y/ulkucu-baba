@@ -27,7 +27,7 @@ _LOCK = threading.Lock()
 _TASKS: Dict[str, Dict[str, Any]] = {}
 _MAX_KEEP = 40
 
-_RE_TOOL = re.compile(r"(?:┊\s*)?💻\s*\$?\s*(.+?)\s*(?:\b\d+(?:\.\d+)?s)?\s*$")
+_RE_TOOL = re.compile(r"(?:┊\s*)?[💻🔍🌐]\s*\$?\s*(.+?)\s*(?:\b\d+(?:\.\d+)?s)?\s*$")
 _RE_BOXTOP = re.compile(r"╭[─-].*Hermes|╭[─-]{4,}")
 _RE_BOXBOT = re.compile(r"^\s*╰[─-]{4,}")
 _RE_SESSION = re.compile(r"^\s*Session:\s*(\S+)")
@@ -93,7 +93,7 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
                     rec["sure"] = _RE_DURATION.search(line).group(1).strip()
                 elif _RE_MSGS.search(line):
                     rec["mesaj_sayisi"] = _RE_MSGS.search(line).group(1).strip()
-                elif ("💻" in line or "┊" in line) and "preparing terminal" not in line:
+                elif any(e in line for e in ("💻", "🔍", "🌐")) and "preparing" not in line:
                     mt = _RE_TOOL.search(line)
                     if mt:
                         _add_stage(rec, str(n), "ARAÇ", "ok", mt.group(1)); n += 1
@@ -143,7 +143,8 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
 
 
 def start(prompt: str, *, group: Optional[str] = None, profile: str = "current",
-          auto_escalate: bool = False, timeout: int = 900) -> str:
+          auto_escalate: bool = False, timeout: int = 900,
+          cwd: Optional[str] = None) -> str:
     gid = uuid.uuid4().hex[:8]
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"
@@ -170,7 +171,7 @@ def start(prompt: str, *, group: Optional[str] = None, profile: str = "current",
         [sys.executable, str(cli), "-q", prompt, "--oneshot"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         encoding="utf-8", errors="replace",
-        env=env, cwd=env.get("HERMES_HOME") or None, bufsize=1,
+        env=env, cwd=cwd or env.get("HERMES_HOME") or None, bufsize=1,
     )
     rec = {
         "gid": gid, "prompt": prompt, "group": group, "profile": profile,
