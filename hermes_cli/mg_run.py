@@ -178,7 +178,7 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
 
 
 def start(prompt: str, *, group: Optional[str] = None, profile: str = "current",
-          auto_escalate: bool = False, timeout: int = 900,
+          auto_escalate: bool = False, timeout: int = 1800,
           cwd: Optional[str] = None) -> str:
     gid = uuid.uuid4().hex[:8]
     env = dict(os.environ)
