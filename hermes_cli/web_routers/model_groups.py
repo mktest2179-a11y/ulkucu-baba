@@ -840,13 +840,34 @@ function renderChat(){
   const s=$('#scroll');if(s.scrollHeight-s.scrollTop-s.clientHeight<160)s.scrollTop=s.scrollHeight;
 }
 async function pollGorev(m){
+  let delay=1500;
   for(let i=0;i<1200;i++){
-    let r;try{r=await j('/api/model-groups/gorev/'+m.gid)}catch(x){await new Promise(s=>setTimeout(s,1500));continue}
+    let r;
+    try{r=await j('/api/model-groups/gorev/'+m.gid)}
+    catch(x){
+      // "Gorev yok" (404) means the server no longer knows this task at
+      // all — a restart pruned it, or the gid never existed. Every future
+      // poll gets the exact same 404, so retrying for up to 30 minutes
+      // (1200 x 1.5s) just leaves the card stuck on "CALISIYOR" doing
+      // nothing. Stop immediately and say so instead of hanging forever.
+      if(x.message==='Görev yok'){
+        m.rec={...(m.rec||{}),durum:'hata',hata:'Görev sunucuda bulunamadı (sunucu yeniden başlamış olabilir) — sonuç kayboldu.'};
+        renderChat();saveChat();$('#send').disabled=false;
+        HIST.unshift({title:(m.prompt||'').slice(0,44),preview:'hata',chat:JSON.parse(JSON.stringify(CHAT))});HIST=HIST.slice(0,40);saveHist();renderHist();
+        return;
+      }
+      // Any other failure (network blip, 5xx) is presumed transient:
+      // back off instead of hammering every 1.5s for the full 30 minutes.
+      delay=Math.min(delay*1.5,15000);
+      await new Promise(s=>setTimeout(s,delay));
+      continue;
+    }
+    delay=1500;
     m.rec=r;renderChat();saveChat();
     if(r.durum==='teslim_bekliyor'){$('#send').disabled=false;return}
     if(r.durum==='bitti'||r.durum==='hata'||r.durum==='iptal'){$('#send').disabled=false;
       HIST.unshift({title:(m.prompt||'').slice(0,44),preview:r.durum,chat:JSON.parse(JSON.stringify(CHAT))});HIST=HIST.slice(0,40);saveHist();renderHist();return}
-    await new Promise(s=>setTimeout(s,1500));
+    await new Promise(s=>setTimeout(s,delay));
   }
   $('#send').disabled=false;
 }
@@ -914,7 +935,12 @@ document.addEventListener('click',async e=>{
   const ip=e.target.closest('[data-iptal]'),on=e.target.closest('[data-onay]'),rd=e.target.closest('[data-red]'),dv=e.target.closest('[data-devam]'),ts=e.target.closest('[data-teslim]');
   if(ts){
     const [gid,karar]=ts.dataset.teslim.split(',');
-    try{await j('/api/model-groups/gorev/'+gid+'/teslim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar})})}catch(x){}
+    // The local state below used to run unconditionally — a failed request
+    // (server restarted mid-task, an expired token) still made the card
+    // show "teslim edildi"/"reddedildi" even though the server never saw
+    // the decision. Only apply it once the server has actually confirmed.
+    try{await j('/api/model-groups/gorev/'+gid+'/teslim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar})})}
+    catch(x){alert('Teslim kararı sunucuya ulaşmadı: '+x.message);return}
     const m=CHAT.find(x=>x.role==='gorev'&&x.gid===gid);
     if(m&&m.rec){m.rec.durum=(karar==='approve')?'bitti':'iptal';
       m.rec.asamalar=(m.rec.asamalar||[]).concat([{no:'!',ad:'TESLİM',durum:(karar==='approve')?'ok':'hata',detay:(karar==='approve')?'kullanıcı teslimi onayladı':'kullanıcı teslimi reddetti'}]);
@@ -922,9 +948,13 @@ document.addEventListener('click',async e=>{
       HIST.unshift({title:(m.prompt||'').slice(0,44),preview:m.rec.durum,chat:JSON.parse(JSON.stringify(CHAT))});HIST=HIST.slice(0,40);saveHist();renderHist();}
     return;
   }
-  if(ip){try{await j('/api/model-groups/gorev/'+ip.dataset.iptal+'/iptal',{method:'POST'})}catch(x){}}
-  if(on){try{await j('/api/model-groups/gorev/'+on.dataset.onay+'/onay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar:'approve'})})}catch(x){}}
-  if(rd){try{await j('/api/model-groups/gorev/'+rd.dataset.red+'/onay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar:'deny'})})}catch(x){}}
+  // iptal/onay/red have no local optimistic state — the next poll picks up
+  // the real server state on success. A failed request used to just do
+  // nothing visibly; surface it so a stuck button reads as "didn't go
+  // through" instead of "nothing happened, try clicking again forever".
+  if(ip){try{await j('/api/model-groups/gorev/'+ip.dataset.iptal+'/iptal',{method:'POST'})}catch(x){alert('Durdurma isteği başarısız: '+x.message)}}
+  if(on){try{await j('/api/model-groups/gorev/'+on.dataset.onay+'/onay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar:'approve'})})}catch(x){alert('Onay isteği başarısız: '+x.message)}}
+  if(rd){try{await j('/api/model-groups/gorev/'+rd.dataset.red+'/onay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({karar:'deny'})})}catch(x){alert('Reddetme isteği başarısız: '+x.message)}}
   if(dv){
     const m=CHAT.find(x=>x.role==='gorev'&&x.gid===dv.dataset.devam);
     if(!m||$('#send').disabled)return;
@@ -1052,7 +1082,7 @@ async function loadKullanim(){
   }catch(e){/* sessiz: chip olmadan da sayfa çalışır */}
 }
 const _costChip=document.getElementById('costChip');
-if(_costChip)_costChip.onclick=()=>{alert((_costChip.title||'veri yok').replace(/\\n/g,'\\n'))};
+if(_costChip)_costChip.onclick=()=>{alert((_costChip.title||'veri yok').replace(/\\n/g,'\n'))};
 loadKullanim(); setInterval(loadKullanim,15000);
 </script></body></html>"""
 
