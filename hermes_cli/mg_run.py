@@ -35,6 +35,13 @@ _RE_DURATION = re.compile(r"^\s*Duration:\s*(.+)$")
 _RE_MSGS = re.compile(r"^\s*Messages:\s*(.+)$")
 _RE_ERR = re.compile(r"(traceback \(most recent call last\)|error:|exception|fatal)", re.I)
 _RE_FALLBACK_HOLD = re.compile(r"Kademe yukseltme izni bekliyor|fallback_approval", re.I)
+# agent/display.py's _emit_inline_diff() prints this exact marker (see there)
+# before a write_file/patch tool's unified diff, one raw line at a time, with
+# no closing marker of its own. Nearly every Python source file contains the
+# word "exception" (any try/except block), so a diff that adds or shows one —
+# "+    except Exception as e:" — matched _RE_ERR and got logged as a "HATA"
+# stage even though nothing failed; the task was just reviewing/writing code.
+_RE_DIFF_START = re.compile(r"┊\s*review diff")
 
 
 def _cli_py() -> Path:
@@ -65,6 +72,7 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
     box_seen = False
     answer: List[str] = []
     in_box = False
+    in_diff = False
     try:
         for raw in iter(proc.stdout.readline, ""):
             line = raw.rstrip("\n")
@@ -74,17 +82,26 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
                     rec["cikti"] = rec["cikti"][-3000:]
 
                 s = line.strip()
-                if _RE_FALLBACK_HOLD.search(line):
+                if _RE_DIFF_START.search(line):
+                    # The marker line itself and every raw diff line after it
+                    # (until a genuine new event — another tool call, the
+                    # answer box, session footer, ...) are code content, not
+                    # process output. None of that should feed the HATA scan.
+                    in_diff = True
+                elif _RE_FALLBACK_HOLD.search(line):
+                    in_diff = False
                     rec["durum"] = "onay_bekliyor"
                     rec["onay_tipi"] = "kademe_gecis"
                     _add_stage(rec, str(n), "KADEME İZNİ", "beklemede", s); n += 1
                 elif _RE_BOXBOT.match(line):
                     in_box = False
                 elif _RE_BOXTOP.search(line):
+                    in_diff = False
                     box_seen = True
                     in_box = True
                     _add_stage(rec, str(n), "TESLİM", "calisiyor", "cevap yazılıyor"); n += 1
                 elif _RE_SESSION.search(line):
+                    in_diff = False
                     in_box = False
                     m = _RE_SESSION.search(line)
                     rec["session_id"] = m.group(1)
@@ -94,13 +111,17 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
                 elif _RE_MSGS.search(line):
                     rec["mesaj_sayisi"] = _RE_MSGS.search(line).group(1).strip()
                 elif any(e in line for e in ("💻", "🔍", "🌐")) and "preparing" not in line:
+                    in_diff = False
                     mt = _RE_TOOL.search(line)
                     if mt:
                         _add_stage(rec, str(n), "ARAÇ", "ok", mt.group(1)); n += 1
                 elif s.startswith("Initializing agent"):
+                    in_diff = False
                     _add_stage(rec, str(n), "MODEL", "calisiyor", "ajan başlatıldı"); n += 1
                 elif in_box and s and not s.startswith(("╭", "╰", "─", "Resume this")):
                     answer.append(s.strip("│ ").strip())
+                elif in_diff:
+                    pass  # raw diff content line — recorded in cikti above, nothing else
                 elif _RE_ERR.search(line):
                     _add_stage(rec, str(n), "HATA", "hata", s[:180]); n += 1
                     rec["hata"] = s[:300]
