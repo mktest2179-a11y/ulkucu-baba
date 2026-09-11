@@ -25,7 +25,7 @@ import subprocess
 
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Any, Dict, List, Optional
 
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 from hermes_constants import (
@@ -1341,6 +1341,70 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         except Exception:
             pass  # Ignore typing indicator failures
     
+    async def list_channels(self) -> Optional[List[Dict[str, Any]]]:
+        """Enumerate send targets for the gateway's channel directory.
+
+        Without this hook ``build_channel_directory`` falls back to scanning
+        session history, which is empty until a chat has already exchanged a
+        message — so ``channel_directory.json`` stays ``{"whatsapp": []}`` and
+        ``send_message`` has nothing to route to.  Returning ``None`` (rather
+        than an empty list) on failure keeps that session-history fallback
+        available instead of publishing an authoritative "no targets".
+        """
+        if not self._running or not self._http_session:
+            return None
+        if await self._check_managed_bridge_exit():
+            return None
+
+        try:
+            import aiohttp
+
+            async with self._http_session.get(
+                f"http://127.0.0.1:{self._bridge_port}/chats",
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(
+                        "[Whatsapp] /chats returned HTTP %s; "
+                        "falling back to session history", resp.status
+                    )
+                    return None
+                payload = await resp.json()
+        except Exception as e:
+            logger.debug("[Whatsapp] Could not list chats: %s", e)
+            return None
+
+        raw = payload.get("chats") if isinstance(payload, dict) else payload
+        if not isinstance(raw, list):
+            return None
+
+        channels: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            chat_id = str(item.get("id") or "").strip()
+            if not chat_id:
+                continue
+            channels.append({
+                "id": chat_id,
+                "name": str(item.get("name") or chat_id.split("@", 1)[0]),
+                "type": str(item.get("type") or "dm"),
+            })
+
+        # Merge in chats we've actually talked to but that the bridge cannot
+        # enumerate (individual DMs are not listable through Baileys).
+        try:
+            from gateway.channel_directory import _build_from_sessions
+            known = {c["id"] for c in channels}
+            for entry in await asyncio.to_thread(_build_from_sessions, "whatsapp"):
+                if entry.get("id") and entry["id"] not in known:
+                    channels.append(entry)
+                    known.add(entry["id"])
+        except Exception as e:
+            logger.debug("[Whatsapp] session-history merge skipped: %s", e)
+
+        return channels
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get information about a WhatsApp chat."""
         if not self._running or not self._http_session:

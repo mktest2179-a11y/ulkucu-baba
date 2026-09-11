@@ -18,6 +18,24 @@ import hermes_cli.update_inventory as update_inventory
 from hermes_cli import main as cli_main
 
 
+def _silence_process_scan(monkeypatch, dp):
+    """Make the live process scan find nothing, on POSIX *and* Windows.
+
+    Stubbing only ``dp.subprocess.run`` neutralises the ``ps`` branch.  On
+    Windows ``_scan_dashboard_processes`` instead calls ``bounded_probe_run``
+    (imported from ``_subprocess_compat`` inside the function), which stayed
+    unpatched — so the test scanned the real machine and picked up whatever
+    dashboards the developer happened to be running.  Patch both entry points
+    so the assertions are about the ledger, as intended.
+    """
+    empty = SimpleNamespace(returncode=0, stdout="")
+    monkeypatch.setattr(dp.subprocess, "run", lambda *a, **k: empty)
+    monkeypatch.setattr(
+        "hermes_cli._subprocess_compat.bounded_probe_run",
+        lambda *a, **k: empty,
+    )
+
+
 def _ledger_entry(**over):
     entry = {
         "pid": 4321,
@@ -198,10 +216,7 @@ def test_scan_dashboard_processes_includes_ledger_only_serves(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.process_identity", fake_pi)
 
     # Force the ps/wmic scan itself to find nothing.
-    fake_run = SimpleNamespace(returncode=0, stdout="")
-    monkeypatch.setattr(
-        dp.subprocess, "run", lambda *a, **k: fake_run
-    )
+    _silence_process_scan(monkeypatch, dp)
     result = dp._scan_dashboard_processes()
     assert (8123, profiled["argv"]) in result
 
@@ -212,8 +227,7 @@ def test_scan_dashboard_processes_ledger_respects_exclusions(monkeypatch):
     entry = _ledger_entry(pid=8124)
     fake_pi = SimpleNamespace(ledger_entries=lambda **k: [entry])
     monkeypatch.setitem(sys.modules, "hermes_cli.process_identity", fake_pi)
-    fake_run = SimpleNamespace(returncode=0, stdout="")
-    monkeypatch.setattr(dp.subprocess, "run", lambda *a, **k: fake_run)
+    _silence_process_scan(monkeypatch, dp)
 
     assert dp._scan_dashboard_processes(exclude_pids={8124}) == []
 

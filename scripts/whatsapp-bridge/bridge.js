@@ -1103,6 +1103,48 @@ app.get('/chat/:id', async (req, res) => {
   });
 });
 
+// Enumerate the chats this account can send to.  The gateway's channel
+// directory has no other way to learn about WhatsApp targets: unlike Discord
+// or Slack there is no server-side channel list, so without this endpoint the
+// directory can only ever contain chats that already produced a session, and
+// a fresh install shows zero send targets forever.
+app.get('/chats', async (req, res) => {
+  if (!sock) {
+    return res.status(503).json({ error: 'not connected' });
+  }
+
+  const chats = [];
+  const seen = new Set();
+
+  const push = (id, name, type) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    chats.push({ id, name: name || id.replace(/@.*/, ''), type });
+  };
+
+  try {
+    const groups = await sock.groupFetchAllParticipating();
+    for (const [jid, meta] of Object.entries(groups || {})) {
+      push(jid, meta && meta.subject, 'group');
+    }
+  } catch (err) {
+    logger.warn({ err }, 'groupFetchAllParticipating failed');
+  }
+
+  // The account's own JID is always a valid target (self-chat / notes).
+  try {
+    const me = sock.user && sock.user.id;
+    if (me) {
+      const selfJid = me.replace(/:\d+@/, '@');
+      push(selfJid, (sock.user && sock.user.name) || 'Kendim', 'dm');
+    }
+  } catch {
+    // best effort only
+  }
+
+  res.json({ chats });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({

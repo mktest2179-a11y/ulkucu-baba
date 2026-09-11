@@ -109,6 +109,45 @@ def _mg_wait_for_approval(cur: str, nxt: str, why: str, timeout: float = 600.0):
             _t.sleep(1.0)
     except Exception:
         return None
+
+
+def mg_drain_external_steer(agent) -> None:
+    """Pick up a mid-task steer message sent from the Model Groups page.
+
+    A ``hermes mg`` task runs as a headless ``cli.py --oneshot`` subprocess —
+    there is no keyboard for the interactive ``/steer`` command to reach, and
+    the process running the turn is not the web server process the mg page
+    talks to.  ``hermes_cli.mg_run.mudahale()`` bridges that gap the same way
+    ``_mg_wait_for_approval`` above bridges the fallback-approval gate: it
+    writes ``<ipc>/<gid>.steer`` from the server process, and this function
+    (called once per tool-loop iteration, right before the existing
+    ``/steer`` drain) picks it up from here and hands it to the real
+    ``agent.steer()`` — every downstream behaviour (the marker format, role-
+    alternation-safe injection, multi-steer concatenation) is the same
+    already-tested ``/steer`` path a keyboard user gets.
+
+    Non-blocking and fail-open: no mg session, no file, or any I/O error all
+    mean "nothing to do" rather than a turn-stopping error.
+    """
+    gid = os.environ.get("HERMES_MG_GID")
+    ipc = os.environ.get("HERMES_MG_IPC")
+    if not gid or not ipc:
+        return
+    try:
+        import pathlib
+
+        steer_file = pathlib.Path(ipc) / f"{gid}.steer"
+        if not steer_file.exists():
+            return
+        text = steer_file.read_text(encoding="utf-8")
+        try:
+            steer_file.unlink()
+        except Exception:
+            pass
+        if text.strip():
+            agent.steer(text)
+    except Exception:
+        pass
     return None
 
 

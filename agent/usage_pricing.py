@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Literal, Optional
@@ -64,6 +64,7 @@ CostSource = Literal[
     "provider_generation_api",
     "provider_models_api",
     "official_docs_snapshot",
+    "models_dev_catalog",
     "user_override",
     "custom_contract",
     "none",
@@ -1189,6 +1190,23 @@ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]
     entry = _OFFICIAL_DOCS_PRICING.get((route.provider, model))
     if entry:
         return entry
+    # Vendor-prefixed slug through an aggregator/relay: the route's provider is
+    # the relay ("custom", a gateway name, …) but the model itself names its
+    # vendor, e.g. "anthropic/claude-sonnet-4-5" served by api.example.com.
+    # The rates are the vendor's, so resolve on the prefix rather than leaving
+    # every relay-served model unpriced.
+    if "/" in model:
+        vendor, _, bare = model.partition("/")
+        if vendor != route.provider:
+            entry = _OFFICIAL_DOCS_PRICING.get((vendor, bare))
+            if entry:
+                return entry
+            if vendor == "anthropic":
+                normalized = _normalize_anthropic_model_name(bare)
+                if normalized != bare:
+                    entry = _OFFICIAL_DOCS_PRICING.get((vendor, normalized))
+                    if entry:
+                        return entry
     # Try normalized name for Anthropic (handles dot-notation like opus-4.7)
     if route.provider == "anthropic":
         normalized = _normalize_anthropic_model_name(model)
@@ -1340,23 +1358,148 @@ def get_pricing_entry(
 
     # Operator-supplied rates win over bundled docs / endpoint metadata so a
     # custom aggregator model can be priced (and mispriced defaults fixed).
+    # They win FIELD BY FIELD, though: a hand-written config row typically
+    # lists input/output/cache_read and omits cache_write, and treating that
+    # row as the whole answer priced every cache write at nothing. Lower
+    # sources fill only the gaps the operator left, so the operator never has
+    # to restate a rate they did not want to change — and a model they never
+    # listed at all still prices correctly from the bundled table.
     cfg_entry = _config_pricing_entry(route)
-    if cfg_entry:
-        return cfg_entry
-
     bundled_entry = _lookup_official_docs_pricing(route)
-    if bundled_entry:
-        return bundled_entry
-    if route.base_url:
-        entry = _pricing_entry_from_metadata(
+    catalog_entry = _models_dev_pricing_entry(route)
+
+    # Endpoint metadata is a network call, so it stays the last resort: it is
+    # fetched only when neither local source knows the model at all (the
+    # pre-existing contract — bundled rates must never trigger a fetch).
+    metadata_entry = None
+    if (
+        route.base_url
+        and cfg_entry is None
+        and bundled_entry is None
+        and catalog_entry is None
+    ):
+        metadata_entry = _pricing_entry_from_metadata(
             fetch_endpoint_model_metadata(route.base_url, api_key=api_key or ""),
             route.model,
             source_url=f"{route.base_url.rstrip('/')}/models",
             pricing_version="openai-compatible-models-api",
         )
-        if entry:
-            return entry
-    return None
+
+    return _merge_pricing_entries(
+        cfg_entry, bundled_entry, catalog_entry, metadata_entry
+    )
+
+
+def _models_dev_pricing_entry(route: "BillingRoute") -> Optional[PricingEntry]:
+    """Rates from the live models.dev catalog on disk.
+
+    The bundled ``_OFFICIAL_DOCS_PRICING`` table is a snapshot frozen at
+    release: it knows a few hundred models and goes stale the moment a vendor
+    reprices. The catalog Hermes already downloads and refreshes
+    (``models_dev_cache.json``) carries input/output/cache_read/cache_write for
+    thousands of models across every provider, and was never consulted for
+    billing — so any model outside the frozen table priced at nothing, and a
+    repriced model kept billing at the old snapshot rate forever.
+
+    It sits BELOW config and the bundled snapshot in the merge order (an
+    operator override still wins, and the hand-checked vendor table still beats
+    a community catalog) but ABOVE the network call, and it fills whatever
+    those leave blank. Never touches the network: a missing or unreadable cache
+    just yields None.
+    """
+    provider = route.provider
+    model = route.model
+    # Vendor-prefixed slug through a relay: the catalog is keyed by vendor.
+    if "/" in model:
+        vendor, _, bare = model.partition("/")
+        if vendor:
+            provider, model = vendor, bare
+
+    try:
+        from agent.models_dev import get_model_info
+
+        info = get_model_info(provider, model, allow_network=False)
+    except Exception:
+        return None
+    if info is None:
+        return None
+
+    def _rate(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            dec = _to_decimal(value)
+        except Exception:
+            return None
+        # The catalog writes 0 both for "free" and for "we never filled this
+        # in". Treating an unfilled field as free is how cache writes silently
+        # cost nothing, so only a positive rate is taken as stated; a genuinely
+        # free model still prices at 0 through its input/output rates.
+        return dec if dec is not None and dec > 0 else None
+
+    entry = PricingEntry(
+        input_cost_per_million=_rate(info.cost_input),
+        output_cost_per_million=_rate(info.cost_output),
+        cache_read_cost_per_million=_rate(info.cost_cache_read),
+        cache_write_cost_per_million=_rate(info.cost_cache_write),
+        source="models_dev_catalog",
+        source_url="https://models.dev",
+        pricing_version="models-dev-cache",
+    )
+    if all(
+        getattr(entry, f) is None
+        for f in (
+            "input_cost_per_million",
+            "output_cost_per_million",
+            "cache_read_cost_per_million",
+            "cache_write_cost_per_million",
+        )
+    ):
+        return None
+    return entry
+
+
+_MERGEABLE_RATE_FIELDS = (
+    "input_cost_per_million",
+    "output_cost_per_million",
+    "cache_read_cost_per_million",
+    "cache_write_cost_per_million",
+    "request_cost",
+    "tier_threshold_tokens",
+    "input_cost_per_million_above",
+    "output_cost_per_million_above",
+    "cache_read_cost_per_million_above",
+)
+
+
+def _merge_pricing_entries(*entries: Optional[PricingEntry]) -> Optional[PricingEntry]:
+    """Combine pricing sources in priority order, highest first.
+
+    Each rate is taken from the first entry that actually states it, so a
+    partial source no longer suppresses a complete one.  Provenance
+    (``source``/``pricing_version``/``source_url``) follows the
+    highest-priority entry that contributed any rate, which keeps
+    ``cost_source`` honest about who set the rates that dominate the bill.
+    """
+    present = [e for e in entries if e is not None]
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+
+    merged: Dict[str, Any] = {}
+    for field in _MERGEABLE_RATE_FIELDS:
+        for entry in present:
+            value = getattr(entry, field, None)
+            if value is not None:
+                merged[field] = value
+                break
+
+    if not merged:
+        return present[0]
+
+    primary = present[0]
+    return replace(primary, **merged)
 
 
 def normalize_usage(

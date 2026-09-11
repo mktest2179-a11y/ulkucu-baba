@@ -96,6 +96,28 @@ _TELEGRAM_CONNECT_TIMEOUT_SECS_DEFAULT = 180.0
 # platform is queued for the reconnect watcher, which retries with the full
 # 180s budget (is_reconnect=True preserves the offline update queue, #46621).
 _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT = 45.0
+# WhatsApp is the one platform whose connect SPAWNS a process: the Node bridge
+# has to start, load Baileys, restore the session and complete the WhatsApp
+# handshake before /health reports connected. Measured cold start on a Windows
+# logon is 40-60s (bridge spawned 03:27:20, ready before the 03:28:23 retry),
+# so the shared 30s bound guaranteed a failed first attempt at EVERY boot: an
+# ERROR line, "no connected platforms", and a ~40s hole before the watcher's
+# retry succeeded. A warm bridge still connects in well under a second — this
+# budget only gets spent on a genuinely cold start.
+# Connect budgets are LEARNED, not tuned: a platform's first connect uses the
+# shared default, every success records its duration, and later attempts get
+# the slowest observed time times this headroom. WhatsApp is why — it spawns a
+# Node bridge whose cold start is machine-dependent (40-60s measured here, far
+# over the 30s shared bound), and any constant picked for one box is wrong on
+# the next.
+_CONNECT_TIMEOUT_HEADROOM = 2.5
+_CONNECT_DURATION_SAMPLES = 5
+# The cold-start ceiling stays tight for the reason #85993 gives: the initial
+# connect is awaited before the gateway reaches `running`, so one wedged
+# platform must not hold every other one hostage. The retry watcher, which
+# runs after the gateway is already serving, may wait considerably longer.
+_CONNECT_TIMEOUT_INITIAL_CEILING_SECS = 90.0
+_CONNECT_TIMEOUT_RETRY_CEILING_SECS = 180.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 # End reasons that mean the USER deliberately closed this thread of work
 # (/new -> session_reset / new_session, an explicit exit, or a /switch).
@@ -8515,7 +8537,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if initial:
                 return _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT
             return _TELEGRAM_CONNECT_TIMEOUT_SECS_DEFAULT
+        learned = self._learned_connect_timeout_secs(platform, initial=initial)
+        if learned is not None:
+            return learned
         return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
+
+    def _learned_connect_timeout_secs(
+        self, platform=None, *, initial: bool = False
+    ) -> Optional[float]:
+        """Budget derived from how long this platform actually took before.
+
+        A fixed per-platform constant is guesswork that rots: WhatsApp spawns a
+        Node bridge whose cold start depends on the machine, so a number tuned
+        on one box is wrong on the next. Instead each successful connect
+        records its duration (``_record_connect_duration``) and the budget is
+        the slowest observed connect plus generous headroom, clamped so a
+        platform can neither starve nor hold the gateway hostage.
+
+        Returns None until a platform has ever connected, so an unmeasured
+        platform keeps the shared default.
+        """
+        key = getattr(platform, "value", None) or str(platform or "")
+        observed = (getattr(self, "_connect_durations", None) or {}).get(key)
+        if not observed:
+            return None
+        slowest = max(observed)
+        budget = slowest * _CONNECT_TIMEOUT_HEADROOM
+        floor = _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
+        ceiling = (
+            _CONNECT_TIMEOUT_INITIAL_CEILING_SECS
+            if initial
+            else _CONNECT_TIMEOUT_RETRY_CEILING_SECS
+        )
+        return max(floor, min(budget, ceiling))
+
+    def _record_connect_duration(self, platform, seconds: float) -> None:
+        """Remember how long a successful connect took (see above)."""
+        if seconds is None or seconds <= 0:
+            return
+        key = getattr(platform, "value", None) or str(platform or "")
+        if not key:
+            return
+        if getattr(self, "_connect_durations", None) is None:
+            self._connect_durations = {}
+        samples = self._connect_durations.setdefault(key, [])
+        samples.append(float(seconds))
+        # Keep a short window so a one-off stall ages out instead of
+        # permanently inflating the budget.
+        del samples[:-_CONNECT_DURATION_SAMPLES]
 
     async def _connect_adapter_with_timeout(
         self, adapter, platform, *, is_reconnect: bool = False, initial: bool = False
@@ -8544,6 +8613,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         task = asyncio.ensure_future(
             adapter.connect(is_reconnect=is_reconnect)
         )
+        started = time.monotonic()
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
         except asyncio.CancelledError:
@@ -8552,6 +8622,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             raise
         if task in done:
             result = await task
+            if result:
+                # Feeds _learned_connect_timeout_secs so the next boot budgets
+                # from what this machine actually does, not from a constant.
+                self._record_connect_duration(platform, time.monotonic() - started)
             return bool(result)
         task.cancel()
         task.add_done_callback(consume_detached_task_result)
@@ -14668,7 +14742,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Build initial channel directory for send_message name resolution
         try:
             from gateway.channel_directory import build_channel_directory
-            directory = await build_channel_directory(self.adapters)
+            directory = await build_channel_directory(
+                self.adapters,
+                pending_platforms=set(getattr(self, "_failed_platforms", {})),
+            )
             ch_count = sum(len(chs) for chs in directory.get("platforms", {}).values())
             logger.info("Channel directory built: %d target(s)", ch_count)
         except Exception as e:

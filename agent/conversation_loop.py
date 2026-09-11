@@ -2581,6 +2581,12 @@ def run_conversation(
         # iteration, no tools yet), the steer stays pending for the next
         # tool batch — injecting into a user message would break role
         # alternation, and there's no tool output to piggyback on.
+        #
+        # A ``hermes mg`` task has no keyboard to send a /steer from — this
+        # picks up one sent through the mg page instead and enqueues it on
+        # the exact same agent.steer() path; a no-op outside an mg task.
+        from agent.chat_completion_helpers import mg_drain_external_steer
+        mg_drain_external_steer(agent)
         _pre_api_steer = agent._drain_pending_steer()
         if _pre_api_steer:
             _injected = False

@@ -386,6 +386,27 @@ async def kullanim(profile: Optional[str] = None) -> Dict[str, Any]:
 # (ve onunla birlikte) HERMES_HOME/mg_sohbet.json'a kaydedilir; açılışta
 # sunucudaki kopya yüklenir — hangi tarayıcıdan açılırsa açılsın geçmiş gelir.
 
+def _sohbet_load(p: Path) -> Dict[str, Any]:
+    """Read mg_sohbet.json, tolerating a file damaged by a pre-atomic writer.
+
+    Older builds wrote this file through a single shared ``mg_sohbet.tmp``, so
+    two concurrent saves could interleave and leave a short document followed
+    by the tail of the longer one it replaced.  json.loads() rejects the whole
+    file in that case and the browser would come up with an empty history even
+    though the leading document is intact.  Decode just the first value and
+    keep it; the next save rewrites the file cleanly.
+    """
+    raw = p.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            data, _end = json.JSONDecoder().raw_decode(raw.lstrip())
+        except (json.JSONDecodeError, ValueError):
+            data = None
+    return data if isinstance(data, dict) else {"chat": [], "hist": []}
+
+
 @router.get("/api/model-groups/sohbet")
 async def sohbet_get() -> Dict[str, Any]:
     def _run() -> Dict[str, Any]:
@@ -393,7 +414,7 @@ async def sohbet_get() -> Dict[str, Any]:
             from hermes_constants import get_hermes_home
             p = Path(get_hermes_home()) / "mg_sohbet.json"
             if p.exists():
-                data = json.loads(p.read_text(encoding="utf-8"))
+                data = _sohbet_load(p)
                 return {"ok": True, **(data if isinstance(data, dict) else {})}
             return {"ok": True, "chat": [], "hist": []}
         except Exception as exc:
@@ -412,9 +433,11 @@ async def sohbet_post(body: SohbetBody) -> Dict[str, Any]:
         try:
             from hermes_constants import get_hermes_home
             p = Path(get_hermes_home()) / "mg_sohbet.json"
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"chat": body.chat, "hist": body.hist}, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(p)
+            # atomic_json_write gives every save its own mkstemp temp file, so
+            # two browsers saving at once can no longer interleave into one
+            # shared mg_sohbet.tmp and produce a torn file (see _sohbet_load).
+            from utils import atomic_json_write
+            atomic_json_write(p, {"chat": body.chat, "hist": body.hist}, indent=None)
             return {"ok": True}
         except Exception as exc:
             return {"ok": False, "reason": str(exc)[:120]}
@@ -552,6 +575,10 @@ class TeslimBody(BaseModel):
     karar: str = Field(..., pattern="^(approve|reject|onay|red|evet|hayir)$")
 
 
+class MudahaleBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+
+
 @router.post("/api/model-groups/gorev/{gid}/teslim")
 async def gorev_teslim(gid: str, body: TeslimBody) -> Dict[str, Any]:
     """Teslim onay kapisı: kullanıcı sonucu inceledikten sonra verir.
@@ -575,9 +602,27 @@ async def gorev_onay(gid: str, body: OnayBody) -> Dict[str, Any]:
     return {"ok": True, "karar": body.karar}
 
 
+@router.post("/api/model-groups/gorev/{gid}/mudahale")
+async def gorev_mudahale(gid: str, body: MudahaleBody) -> Dict[str, Any]:
+    """Çalışan göreve, görevi iptal etmeden serbest metinle müdahale et.
+
+    Metin, görevi çalıştıran alt sürece IPC dosyasıyla ulaştırılır ve mevcut
+    /steer kanalından modele iletilir — sonraki araç turunda cevaba yansır.
+    """
+    from hermes_cli import mg_run
+
+    ok = mg_run.mudahale(gid.strip(), body.text)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail="Görev yok ya da şu anda çalışmıyor (müdahale sadece 'çalışıyor' durumunda geçerli)",
+        )
+    return {"ok": True}
+
+
 # ── page ─────────────────────────────────────────────────────────────────
 
-_PAGE = """<!doctype html><html lang="tr"><head><meta charset="utf-8">
+_PAGE = r"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Model Grupları — Hermes</title>
 <style>
@@ -639,6 +684,10 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .intv{margin-top:10px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
 .intv .lbl{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
 .intv .btns{display:flex;gap:8px;flex-wrap:wrap}
+.steerbox{display:flex;gap:6px;margin-top:8px}
+.steerbox input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12px;color:var(--fg)}
+.steerbox button{white-space:nowrap}
+.steersent{font-size:11px;color:var(--dim);margin-top:4px}
 .ans{margin-top:8px;background:#101a12;border:1px solid #244f2f;border-radius:10px;padding:9px;font-size:13px;white-space:pre-wrap;color:#d7dbe2}
 .ans.err{background:#1e1112;border-color:#4f2626;color:#ff8b8b}
 .onaybox{margin-top:10px;background:#241d0d;border:1px solid #4a3c14;border-radius:12px;padding:10px}
@@ -680,7 +729,7 @@ input.role{width:88px;padding:4px 6px;font-size:12px;margin-right:4px}
   </aside>
   <main>
     <div id="scroll"><div id="chat"><div class="empty" id="empty">Gorev ver - canli akisi izle, diledigin an dur / iptal et. Kademe gecisinde onay ister.</div></div></div>
-    <div id="taskbar" style="display:none;position:fixed;bottom:112px;left:0;right:0;z-index:60"></div>
+    <div id="taskbar" style="display:none"></div>
     <div class="inbar"><div class="wrap2">
       <div class="inmeta"><span>bu mesajin mimarisi:</span>
         <select id="chatGroup"><option value="">(aktif grup)</option></select>
@@ -689,7 +738,7 @@ input.role{width:88px;padding:4px 6px;font-size:12px;margin-right:4px}
         <input id="cwdInput" type="text" placeholder="D:\Hermes (varsayilan)" style="max-width:280px;padding:4px 8px">
       </div>
       <div class="inrow" style="margin-top:6px">
-        <textarea id="prompt" placeholder="prompt yaz... (Ctrl+Enter gonderir)"></textarea>
+        <textarea id="prompt" placeholder="prompt yaz... (Ctrl+Enter gonderir)" autofocus></textarea>
         <div style="display:flex;flex-direction:column;gap:6px">
           <button id="dosyaBtn" class="ghost" title="Dosya ekle (girdiler klasorune kaydedilir)">📎 Dosya</button>
           <input type="file" id="dosyaInput" style="display:none">
@@ -765,7 +814,12 @@ function gorevHtml(m){
   if(canli||bekl){
     let b=`<button class="bad" data-iptal="${m.gid}">x Iptal / Dur</button>`;
     if(bekl) b=`<button class="good" data-onay="${m.gid}">Onayla - ust kademeye gec</button><button class="bad" data-red="${m.gid}">Reddet - dur</button>`;
-    intv=`<div class="${bekl?'onaybox':'intv'}"><div class="lbl">${bekl?'<span class="dot"></span>KADEME GECIS ONAYI BEKLIYOR':'MUDAHALE'}</div><div class="btns">${b}</div></div>`;
+    // Free-text mid-task steer: only while actually running (canli), not
+    // during the kademe-gecis approval gate (bekl) — that gate is a fixed
+    // yes/no decision, a free-text message there has nowhere defined to go.
+    // Görevi durdurmadan modele araya mesaj gönderir (bkz. /mudahale).
+    const steerBox=canli?`<div class="steerbox"><input type="text" data-steer-in="${m.gid}" placeholder="calisirken araya mesaj yaz... (Enter gonderir)" maxlength="4000"><button class="ghost" data-steer-send="${m.gid}">Gonder</button></div>`:'';
+    intv=`<div class="${bekl?'onaybox':'intv'}"><div class="lbl">${bekl?'<span class="dot"></span>KADEME GECIS ONAYI BEKLIYOR':'MUDAHALE'}</div><div class="btns">${b}</div>${steerBox}</div>`;
   }
   else if(tesl) intv=`<div class="onaybox"><div class="lbl"><span class="dot"></span>TESLIM ONAYI BEKLIYOR - sonucu incele, kararinin</div><div class="btns"><button class="good" data-teslim="${m.gid},approve">&#10003; TESLIM ET</button><button class="bad" data-teslim="${m.gid},reject">&#10007; REDDET / GERI GONDER</button></div></div>`;
   const ans=(r.sonuc&&r.sonuc.cevap&&(r.durum==='bitti'||r.durum==='teslim_bekliyor'))?`<div class="ans">${esc(r.sonuc.cevap)}</div>`:'';
@@ -837,7 +891,26 @@ $('#newChat').onclick=()=>{CHAT=[];saveChat();renderChat()};
 $('#clrHist').onclick=()=>{HIST=[];saveHist();renderHist()};
 $('#hist').addEventListener('click',e=>{const b=e.target.closest('[data-h]');if(!b)return;
   CHAT=JSON.parse(JSON.stringify(HIST[+b.dataset.h].chat));saveChat();renderChat()});
+async function sendSteer(gid,input){
+  const text=(input.value||'').trim();
+  if(!text)return;
+  input.disabled=true;
+  try{
+    const r=await j('/api/model-groups/gorev/'+gid+'/mudahale',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text})});
+    if(r.ok){input.value='';input.placeholder='gonderildi - sonraki tur da isleyecek'}
+    else{alert('Mudahale gonderilemedi: '+(r.detail||'?'))}
+  }catch(x){alert('Mudahale gonderilemedi: '+x.message)}
+  finally{input.disabled=false}
+}
+document.addEventListener('keydown',e=>{
+  const inp=e.target.closest('[data-steer-in]');
+  if(!inp||e.key!=='Enter')return;
+  e.preventDefault();
+  sendSteer(inp.dataset.steerIn,inp);
+});
 document.addEventListener('click',async e=>{
+  const ss=e.target.closest('[data-steer-send]');
+  if(ss){const inp=ss.parentElement.querySelector('[data-steer-in]');if(inp)sendSteer(ss.dataset.steerSend,inp);return}
   const ip=e.target.closest('[data-iptal]'),on=e.target.closest('[data-onay]'),rd=e.target.closest('[data-red]'),dv=e.target.closest('[data-devam]'),ts=e.target.closest('[data-teslim]');
   if(ts){
     const [gid,karar]=ts.dataset.teslim.split(',');
@@ -926,7 +999,7 @@ function renderTaskbar(){
   const m=_activeTask();
   if(!m){ // hic gorev yok: HAZIR durumunda her zaman gorunur
     tb.style.display='block';
-    tb.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel)"><span style="font-weight:700;font-size:12px;color:var(--dim)"><span class="dot"></span> HAZIR</span><span style="color:var(--faint);font-size:11px">gorev bekleniyor</span><span style="flex:1"></span><span style="color:var(--faint);font-size:11px">kontrol: durdur / onayla / devam burada belirir</span></div>';
+    tb.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-top:1px solid var(--line);background:var(--panel)"><span style="font-weight:700;font-size:12px;color:var(--dim)"><span class="dot"></span> HAZIR</span><span style="color:var(--faint);font-size:11px">gorev bekleniyor</span><span style="flex:1"></span><span style="color:var(--faint);font-size:11px">kontrol: durdur / onayla / devam burada belirir</span></div>';
     return;
   }
   const r=m.rec||{}, d=r.durum;
@@ -937,7 +1010,7 @@ function renderTaskbar(){
   else if(d==='onay_bekliyor') btns='<button class="good" data-onay="'+esc(m.gid)+'">&#10003; ONAYLA</button><button class="bad" data-red="'+esc(m.gid)+'">&#10007; REDDET</button>';
   else if(d==='teslim_bekliyor') btns='<button class="good" data-teslim="'+esc(m.gid)+',approve">&#10003; TESLIM ET</button><button class="bad" data-teslim="'+esc(m.gid)+',reject">&#10007; REDDET</button>';
   else if(d==='iptal') btns='<button class="ghost" data-devam="'+esc(m.gid)+'">&#8635; KALDIGI YERDEN DEVAM</button>';
-  const barStyle='display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel)';
+  const barStyle='display:flex;align-items:center;gap:10px;padding:8px 14px;border-top:1px solid var(--line);background:var(--panel)';
   if(d==='calisiyor'||d==='onay_bekliyor'||d==='teslim_bekliyor'){ tb.style.display='block'; tb.innerHTML='<div style="'+barStyle+'"><span style="font-weight:700;font-size:12px;color:'+(d==='onay_bekliyor'?'var(--warn)':'var(--ok)')+'">'+lbl+'</span>'+gidHtml+'<span style="flex:1"></span>'+btns+'</div>'; }
   else if(d==='iptal'){ tb.style.display='block'; tb.innerHTML='<div style="'+barStyle+'"><span style="font-weight:700;font-size:12px;color:var(--bad)">'+lbl+'</span>'+gidHtml+'<span style="flex:1"></span>'+btns+'</div>'; }
   else { // bitti / hata: sonucu goster ama kapatilabilir durumda
@@ -948,6 +1021,9 @@ const _origRenderChat=renderChat;
 renderChat=function(){ _origRenderChat(); renderTaskbar(); };
 document.addEventListener('DOMContentLoaded',renderTaskbar);
 renderTaskbar();
+const _inbar=$('.inbar');
+if(_inbar){_inbar.addEventListener('click',e=>{if(!['INPUT','BUTTON','SELECT','A','TEXTAREA'].includes(e.target.tagName))$('#prompt').focus()});}
+setTimeout(()=>{$('#prompt').focus()},100);
 // acilista sunucudaki (tum tarayicilarda ortak) sohbet gecmisini yukle:
 // yerel kopyadan daha zenginse ekrana getir ve canli gorevleri yeniden izlemeye al.
 (async()=>{try{

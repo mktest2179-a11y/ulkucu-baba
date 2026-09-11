@@ -13,6 +13,7 @@ patches on ``hermes_cli.main`` resolve unchanged.
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,109 @@ def _m():
     from hermes_cli import main
 
     return main
+
+
+# A dashboard is started by a Python interpreter or the hermes launcher, so
+# identity is asserted positively rather than by listing the shells that must
+# be excluded. A denylist can only ever name the wrappers seen so far — the
+# next one (a new shell, a supervisor, an IDE runner) quietly reads as a
+# dashboard again, and --stop kills whatever the scan returns.
+_INTERPRETER_RE = re.compile(
+    r'^(?:python|pythonw|python\d(?:\.\d+)?|py|uv|uvx|hermes)(?:\.exe)?$'
+)
+
+# Tokens that introduce the hermes CLI: the next argv entry is its subcommand.
+_HERMES_ENTRYPOINTS = frozenset({"hermes", "hermes.exe", "hermes_cli.main"})
+
+
+def _split_cmdline(cmdline: str) -> list[str]:
+    """Best-effort argv split that keeps quoted arguments as single tokens."""
+    import shlex
+
+    try:
+        return shlex.split(cmdline, posix=(sys.platform != "win32"))
+    except ValueError:
+        # Unbalanced quotes — fall back to whitespace splitting.
+        return cmdline.split()
+
+
+def _cmdline_is_dashboard(cmdline: str) -> bool:
+    """True when *cmdline* is really a ``hermes dashboard``/``serve`` server.
+
+    The scan used to ask whether the raw command line *contained* a string
+    like ``"hermes_cli.main dashboard"``.  That matches any process which
+    merely quotes the command rather than being it — most commonly a shell
+    invoked as ``bash -c "... hermes_cli.main dashboard --status ..."``, but
+    equally an editor, a supervisor, or an agent session that happens to
+    mention it.  Since ``--stop`` kills whatever this returns, a false match
+    is not a cosmetic listing bug: it terminates an unrelated process.
+
+    Identity is taken from argv structure instead: the executable must not be
+    a shell or script host, and the subcommand must sit in its own argv slot
+    directly after the entry point that introduces it.  Quoted text inside a
+    wrapper's ``-c`` argument stays one token, so it can no longer line up.
+    """
+    argv = _split_cmdline(cmdline)
+    if not argv:
+        return False
+
+    exe = os.path.basename(argv[0].strip('"').replace("\\", "/").rstrip("/")).lower()
+    if not _INTERPRETER_RE.match(exe):
+        return False
+
+    for i, raw in enumerate(argv[:-1]):
+        tok = raw.strip('"')
+        normalized = tok.replace("\\", "/").lower()
+        # Compare the basename too: an absolute launcher path
+        # ("/usr/local/bin/hermes dashboard") is the same entry point.
+        if (
+            tok.lower() not in _HERMES_ENTRYPOINTS
+            and os.path.basename(normalized) not in _HERMES_ENTRYPOINTS
+            and not normalized.endswith("hermes_cli/main.py")
+        ):
+            continue
+        if _subcommand_after(argv, i + 1) in ("dashboard", "serve"):
+            return not _is_control_invocation(argv)
+    return False
+
+
+# One-shot control flags: `hermes dashboard --status/--stop` inspects or stops
+# servers, it never becomes one.  Such an invocation must not be reported as a
+# running dashboard — `--stop` kills whatever the scan returns, so listing the
+# control command means the command can kill its own launcher process.
+_CONTROL_FLAGS = frozenset({"--status", "--stop", "--help", "-h", "--version"})
+
+
+def _is_control_invocation(argv: list[str]) -> bool:
+    return any(tok.strip('"').split("=", 1)[0] in _CONTROL_FLAGS for tok in argv)
+
+
+# Global flags accepted before the subcommand that consume the next argv slot.
+_VALUE_TAKING_GLOBALS = frozenset({
+    "--profile", "-p", "--config", "--home", "--hermes-home",
+})
+
+
+def _subcommand_after(argv: list[str], start: int) -> str | None:
+    """First non-flag token after *start*, skipping hermes' global options.
+
+    ``hermes --profile work dashboard`` puts global flags between the entry
+    point and the subcommand, so plain adjacency would miss profiled
+    launches.  Only option tokens may be skipped: the first token that is
+    not a flag (or a known flag's value) decides the answer, so an unrelated
+    subcommand such as ``gateway`` still yields a non-match rather than
+    letting the walk run on to some later word.
+    """
+    i = start
+    while i < len(argv):
+        tok = argv[i].strip('"')
+        if not tok.startswith("-"):
+            return tok
+        if tok in _VALUE_TAKING_GLOBALS and "=" not in tok:
+            i += 2
+        else:
+            i += 1
+    return None
 
 
 def _scan_dashboard_processes(
@@ -53,17 +157,11 @@ def _scan_dashboard_processes(
 
     Returns an empty list on any scan error (missing ps/wmic, timeout, etc.).
     """
-    patterns = [
-        "hermes dashboard",
-        "hermes_cli.main dashboard",
-        "hermes_cli/main.py dashboard",
-        # The headless backend (`hermes serve`) is the same long-lived server
-        # under a different command name — the desktop app spawns it. Reap it
-        # on update for the same frontend/backend-mismatch reason.
-        "hermes serve",
-        "hermes_cli.main serve",
-        "hermes_cli/main.py serve",
-    ]
+    # Identity comes from argv structure (_cmdline_is_dashboard), not from a
+    # substring of the raw command line.  The headless backend (`hermes
+    # serve`) is the same long-lived server under a different subcommand name
+    # — the desktop app spawns it — so it is reaped on update for the same
+    # frontend/backend-mismatch reason.
     self_pid = os.getpid()
     dashboard_processes: list[tuple[int, str]] = []
 
@@ -100,21 +198,19 @@ def _scan_dashboard_processes(
                     current_cmd = line[len("CommandLine=") :]
                 elif line.startswith("ProcessId="):
                     pid_str = line[len("ProcessId=") :]
-                    if (
-                        any(p in current_cmd for p in patterns)
-                        and int(pid_str) != self_pid
-                    ):
-                        try:
-                            dashboard_processes.append((int(pid_str), current_cmd))
-                        except ValueError:
-                            pass
+                    try:
+                        pid_val = int(pid_str)
+                    except ValueError:
+                        continue
+                    if pid_val != self_pid and _cmdline_is_dashboard(current_cmd):
+                        dashboard_processes.append((pid_val, current_cmd))
         else:
-            # Linux / macOS: scan the process table via ps and match against
-            # the same explicit patterns list used on Windows.  Using ps
-            # (rather than `pgrep -f "hermes.*dashboard"`) keeps us consistent
-            # with `hermes_cli.gateway._scan_gateway_pids` and avoids the
-            # greedy regex matching unrelated cmdlines that merely contain
-            # both words (e.g. a chat session discussing "dashboard").
+            # Linux / macOS: scan the process table via ps and apply the same
+            # argv-structure test used on Windows.  Using ps (rather than
+            # `pgrep -f "hermes.*dashboard"`) keeps us consistent with
+            # `hermes_cli.gateway._scan_gateway_pids` and avoids the greedy
+            # regex matching unrelated cmdlines that merely contain both
+            # words (e.g. a chat session discussing "dashboard").
             result = subprocess.run(
                 ["ps", "-A", "-o", "pid=,command="],
                 capture_output=True,
@@ -134,7 +230,7 @@ def _scan_dashboard_processes(
                     except ValueError:
                         continue
                     command = parts[1]
-                    if any(p in command for p in patterns) and pid != self_pid:
+                    if pid != self_pid and _cmdline_is_dashboard(command):
                         dashboard_processes.append((pid, command))
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []

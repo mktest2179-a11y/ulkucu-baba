@@ -1830,6 +1830,51 @@ def get_context_length_from_provider_error(
     return None
 
 
+_OUTPUT_PARAM_RE = r'(?:max_tokens|max_output_tokens|max_completion_tokens)'
+
+# Shapes providers use to state an output cap. Each captures the CAP only —
+# where a requested value also appears it is matched but not captured, so the
+# oversized number we sent can never be mistaken for the limit.
+_OUTPUT_CAP_PATTERNS = (
+    # "max_tokens: 65536 > 64000, ..."  /  "max_tokens 65536 > 64000"
+    rf'{_OUTPUT_PARAM_RE}\s*[:=]?\s*\d+\s*>\s*(\d+)',
+    # "Range of max_tokens should be [1, 65536]"
+    rf'{_OUTPUT_PARAM_RE}[^\[\]]{{0,60}}\[\s*\d+\s*,\s*(\d+)\s*\]',
+    # "max_tokens (98304) exceeds ... maximum output tokens (65536)"
+    r'maximum output tokens\s*\(?\s*(\d+)',
+    # "max_tokens must be <= 32000" / "less than or equal to 32000"
+    rf'{_OUTPUT_PARAM_RE}[^.;]{{0,60}}?'
+    r'(?:<=|less than or equal to|at most|no more than|up to|maximum of)\s*(\d+)',
+    # "... the maximum allowed number of output tokens ... is 64000"
+    r'(?:allowed|maximum)[^.;]{0,60}?output tokens[^.;]{0,40}?(?:is|of|:)\s*(\d+)',
+)
+
+
+def _extract_output_cap(error_lower: str) -> Optional[int]:
+    """Pull the stated output-token cap out of an error, by shape not wording.
+
+    Providers disagree on the sentence but all of them print the number, so
+    matching the structure ("<param> ... <bound> <digits>") keeps new or
+    reworded upstream messages working without another hard-coded phrase.
+    Returns None when nothing states a cap, which is what keeps this from
+    firing on unrelated errors that merely contain digits.
+    """
+    if not re.search(_OUTPUT_PARAM_RE, error_lower) and (
+        "output tokens" not in error_lower
+    ):
+        return None
+    for pattern in _OUTPUT_CAP_PATTERNS:
+        match = re.search(pattern, error_lower)
+        if match:
+            try:
+                cap = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if cap >= 1:
+                return cap
+    return None
+
+
 def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
     """Detect an "output cap too large" error and return how many output tokens are available.
 
@@ -1882,9 +1927,26 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
         # This is independent of the input context window.
         "exceeds model" in error_lower
         and "maximum output tokens" in error_lower
+    ) or (
+        # Anthropic's own phrasing, which also reaches us through any relay
+        # that forwards the upstream error body verbatim:
+        #   "max_tokens: 65536 > 64000, which is the maximum allowed number
+        #    of output tokens for claude-sonnet-4-5-20250929"
+        # None of the patterns above match it, so the retry clamp never fired
+        # and every single request failed permanently instead of retrying at
+        # the cap the provider just told us.  The input is irrelevant here —
+        # this is purely an output cap.
+        # Same structural fallback the classifier uses: any wording that
+        # names the output parameter and states a numeric bound for it,
+        # so a relay or a reworded upstream message needs no new phrase.
+        _extract_output_cap(error_lower) is not None
     )
     if not is_output_cap_error:
         return None
+
+    _structural = _extract_output_cap(error_lower)
+    if _structural is not None:
+        return _structural
 
     # Generic model-output-cap form:
     #   "max_tokens (98304) exceeds model's maximum output tokens (65536)"
@@ -2035,6 +2097,12 @@ def is_output_cap_error(error_msg: str) -> bool:
         or "must be" in error_lower
         or ("exceeds model" in error_lower
             and "maximum output tokens" in error_lower)
+        # Structural fallback for wordings nobody has enumerated yet: the
+        # error names the output parameter AND states a numeric bound for it.
+        # Every provider phrases the sentence differently but they all have to
+        # print the cap, so match the shape instead of the prose — a new relay
+        # or a reworded upstream message keeps working without a code change.
+        or _extract_output_cap(error_lower) is not None
     )
     if not output_cap_signal:
         return False

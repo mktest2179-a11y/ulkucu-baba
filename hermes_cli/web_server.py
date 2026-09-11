@@ -19618,65 +19618,19 @@ def _demo() -> None:
 # 75 == BSD ``EX_TEMPFAIL`` (sysexits.h) — the codebase's existing convention
 # for "transient environmental condition, not a code failure" (see
 # gateway/restart.py and kanban_db.py's quota-wall sentinel).
-PORT_IN_USE_EXIT_CODE = 75
+# Canonical implementations live in hermes_cli.port_probe so `hermes mg` can
+# reach them without importing this module.  The private names are kept as
+# aliases: call sites below and existing test monkeypatches on
+# ``hermes_cli.web_server._port_bind_conflict`` resolve unchanged.
+from hermes_cli.port_probe import (  # noqa: F401
+    PORT_IN_USE_EXIT_CODE,
+    is_addr_in_use_error as _is_addr_in_use_error,
+    port_bind_conflict as _port_bind_conflict,
+)
 
 # One line, stable format, parsed by machines — mirrors the shape of the
 # HERMES_BACKEND_READY sentinel (which is NOT changed by any of this).
 _PORT_IN_USE_SENTINEL = "BACKEND_PORT_IN_USE port={port}"
-
-
-def _is_addr_in_use_error(exc: OSError) -> bool:
-    """True when ``exc`` is the platform's address-in-use bind failure."""
-    import errno
-
-    codes = {errno.EADDRINUSE, 98, 48, 10048}  # POSIX, Linux, macOS, WinSock
-    if exc.errno in codes:
-        return True
-    return getattr(exc, "winerror", None) == 10048  # WSAEADDRINUSE
-
-
-def _port_bind_conflict(host: str, port: int) -> bool:
-    """Probe whether binding ``host:port`` would fail with EADDRINUSE.
-
-    ``port == 0`` (ephemeral) can never conflict — the kernel picks a free
-    port — so the probe is skipped and ``--port 0`` behaves exactly as
-    before. Any probe error other than address-in-use returns ``False`` so
-    uvicorn surfaces it with its normal diagnostics (bad host, EACCES, …).
-    """
-    if not port:
-        return False
-    import socket as _socket
-
-    family = _socket.AF_INET6 if ":" in host else _socket.AF_INET
-    try:
-        probe = _socket.socket(family, _socket.SOCK_STREAM)
-    except OSError:
-        return False
-    try:
-        import sys as _sys_mod
-
-        _exclusive = getattr(_socket, "SO_EXCLUSIVEADDRUSE", None)
-        if _sys_mod.platform == "win32" and _exclusive is not None:
-            # Windows: SO_REUSEADDR means "bind over anyone" — a probe (or
-            # uvicorn bind) with it SUCCEEDS on top of a live LISTEN socket,
-            # so it can never detect a conflict. SO_EXCLUSIVEADDRUSE makes
-            # the probe fail with WSAEADDRINUSE exactly when another socket
-            # holds the port (the reporter's 10048 shape in #93608).
-            probe.setsockopt(_socket.SOL_SOCKET, _exclusive, 1)
-        else:
-            # POSIX: match uvicorn's bind flags (uvicorn/config.py
-            # bind_socket) so the probe conflicts exactly when uvicorn's own
-            # bind would: SO_REUSEADDR lets TIME_WAIT remnants pass while a
-            # live LISTEN socket still fails.
-            probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        probe.bind((host, port))
-    except OSError as exc:
-        return _is_addr_in_use_error(exc)
-    except Exception:
-        return False
-    finally:
-        probe.close()
-    return False
 
 
 def _write_machine_sentinel_line(line: str) -> None:

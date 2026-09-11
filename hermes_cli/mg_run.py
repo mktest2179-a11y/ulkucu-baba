@@ -132,7 +132,21 @@ def _reader(gid: str, proc: subprocess.Popen) -> None:
             rec["sonuc"] = {"cevap": ans or "(cevap ayrıştırılamadı — ham çıktıya bak)", "ham": tam[-8000:]}
             if rec["durum"] == "onay_bekliyor":
                 pass  # keep awaiting
-            elif rec.get("hata") or (proc.returncode not in (0, None)):
+            elif proc.returncode not in (0, None):
+                # A non-zero/crashed exit is unconditionally a failure — the
+                # process itself didn't finish cleanly, whatever it printed.
+                rec["durum"] = "hata"
+            elif rec.get("hata") and not ans:
+                # `rec["hata"]` only means "an error LINE appeared somewhere in
+                # the run" (any failed tool call sets it) — it says nothing
+                # about whether the agent went on to deliver a real answer.
+                # The old check (`rec.get("hata") or returncode != 0`) flagged
+                # the WHOLE task as failed on that alone, so an agent that hit
+                # one recoverable tool error (a bad regex, a blocked command)
+                # and then completed normally — parsed answer and all — still
+                # got shown to the user as "HATA" with no way to see the real
+                # result without digging into raw output. Only treat it as a
+                # failure when the run ALSO never produced a parsed answer.
                 rec["durum"] = "hata"
             elif rec["durum"] != "iptal":
                 # Teslim onay kapisı: görev başarılı bittiğinde otomatik
@@ -233,6 +247,39 @@ def respond(gid: str, karar: str) -> bool:
         # denied escalation → the gate returns False and the run ends; also
         # nudge the process if it lingers
         threading.Thread(target=lambda: (time.sleep(20), cancel(gid)), daemon=True).start()
+    return True
+
+
+def mudahale(gid: str, text: str) -> bool:
+    """Send a free-text mid-task steer without cancelling the running task.
+
+    Writes ``<ipc>/<gid>.steer``, which the running ``cli.py --oneshot``
+    subprocess picks up via ``chat_completion_helpers.mg_drain_external_steer``
+    on its next tool-loop iteration and hands to the real ``agent.steer()`` —
+    the same mid-turn injection a keyboard ``/steer`` gets, just reached
+    through this IPC file instead of stdin (mirrors the ``.pending``/``.resp``
+    approval channel used by ``respond()`` above).
+
+    Only meaningful while the task is actually running: a finished task has
+    no subprocess left to poll the file, so this returns False for any
+    ``durum`` other than 'calisiyor'.
+    """
+    gid = gid.strip()
+    text = (text or "").strip()
+    if not text:
+        return False
+    with _LOCK:
+        rec = _TASKS.get(gid)
+        if rec is None or rec.get("durum") != "calisiyor":
+            return False
+    try:
+        (_ipc_dir() / (gid + ".steer")).write_text(text, encoding="utf-8")
+    except Exception:
+        return False
+    with _LOCK:
+        rec = _TASKS.get(gid)
+        if rec is not None:
+            _add_stage(rec, "!", "MÜDAHALE", "ok", text[:180])
     return True
 
 

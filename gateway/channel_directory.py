@@ -154,9 +154,28 @@ def _warn_slack_directory(team_id: str, detail: str) -> None:
 # Build / refresh
 # ---------------------------------------------------------------------------
 
-async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
+async def build_channel_directory(
+    adapters: Dict[Any, Any],
+    *,
+    pending_platforms: Optional[Any] = None,
+) -> Dict[str, Any]:
     """
     Build a channel directory from connected platform adapters and session data.
+
+    *pending_platforms* names configured platforms that are not connected right
+    now but are queued for the reconnect watcher.  Their previously published
+    targets are carried forward instead of being replaced with an empty list.
+    WhatsApp makes this matter on every cold boot: its Node bridge needs longer
+    to come up than the capped cold-start connect budget, so the gateway
+    reaches ``running`` with WhatsApp queued for retry, rebuilds the directory,
+    and used to overwrite a perfectly good list of chats with ``[]`` for the
+    minute before the retry succeeded.  ``send_message`` had no target to route
+    to in that window.
+
+    This is deliberately narrower than resurrecting session history for any
+    absent platform (see the connected-only rule below): only platforms the
+    gateway is actively retrying keep their entries, so a disabled or
+    decommissioned platform still drops out of the directory immediately.
 
     Returns the directory dict and writes it to the current home's
     ``channel_directory.json``.
@@ -212,6 +231,27 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
                 platforms[entry.name] = await asyncio.to_thread(_build_from_sessions, entry.name)
     except Exception:
         pass
+
+    # Carry forward targets for platforms that are only pending a reconnect.
+    if pending_platforms:
+        pending_names = {
+            getattr(p, "value", str(p)) for p in pending_platforms
+        }
+        missing = [n for n in pending_names if not platforms.get(n)]
+        if missing:
+            try:
+                previous = (load_directory() or {}).get("platforms") or {}
+            except Exception:
+                previous = {}
+            for name in missing:
+                carried = previous.get(name)
+                if carried:
+                    platforms[name] = carried
+                    logger.info(
+                        "Channel directory: keeping %d existing %s target(s) "
+                        "while the platform reconnects",
+                        len(carried), name,
+                    )
 
     # Overlay user-maintained friendly names before persisting.
     _apply_channel_aliases(platforms)
