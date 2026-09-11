@@ -833,10 +833,24 @@ function renderChat(){
   const c=$('#chat');
   if(!CHAT.length){c.innerHTML='<div class="empty">Gorev ver - canli akisi izle.</div>';return}
   const keep={};c.querySelectorAll('.flow').forEach((f,i)=>keep[i]=f.scrollTop);
+  // innerHTML=... below rebuilds the whole tree on every poll tick (every
+  // 1.5-15s while a task runs) — including the steer input. Without this,
+  // an in-flight keystroke was destroyed mid-type by the next poll: the
+  // box visibly "jumped" and cleared, and Enter/click on a stale reference
+  // sent nothing. Snapshot the live steer box (which gid it belongs to,
+  // its text, cursor position, whether it had focus) before the rebuild
+  // and restore it onto the freshly-rendered input afterward.
+  let steerSnap=null;
+  const activeSteer=document.activeElement&&document.activeElement.matches&&document.activeElement.matches('[data-steer-in]')?document.activeElement:null;
+  if(activeSteer)steerSnap={gid:activeSteer.dataset.steerIn,val:activeSteer.value,sel:activeSteer.selectionStart};
   c.innerHTML=CHAT.map(m=>m.role==='user'
     ?`<div class="msg u"><div class="who">sen${m.group?' - ['+esc(m.group)+']':''}</div><div class="bub">${esc(m.text)}</div></div>`
     :`<div class="msg">${gorevHtml(m)}</div>`).join('');
   c.querySelectorAll('.flow').forEach((f,i)=>{if(keep[i]!=null)f.scrollTop=keep[i]});
+  if(steerSnap){
+    const inp=c.querySelector('[data-steer-in="'+CSS.escape(steerSnap.gid)+'"]');
+    if(inp){inp.value=steerSnap.val;inp.focus();try{inp.setSelectionRange(steerSnap.sel,steerSnap.sel)}catch(e){}}
+  }
   const s=$('#scroll');if(s.scrollHeight-s.scrollTop-s.clientHeight<160)s.scrollTop=s.scrollHeight;
 }
 async function pollGorev(m){
