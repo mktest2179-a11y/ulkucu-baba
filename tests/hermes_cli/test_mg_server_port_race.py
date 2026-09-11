@@ -171,8 +171,8 @@ def _stub_response(body: bytes, status: int = 200):
         def __init__(self):
             self.status = status
 
-        def read(self):
-            return body
+        def read(self, n=-1):
+            return body if n < 0 else body[:n]
 
         def __enter__(self):
             return self
@@ -184,10 +184,16 @@ def _stub_response(body: bytes, status: int = 200):
 
 
 def test_mg_already_serving_rejects_a_non_mg_server(monkeypatch):
-    """A different service on the port must not be mistaken for mg."""
+    """A different service on the port must not be mistaken for mg.
+
+    Checks /mg — not an /api/* route — because that's the one path every mg
+    server answers without a token (see _TOKEN_REQUIRED_PREFIX): the page
+    has to be reachable with no credential, or a browser could never load it
+    to receive the token in the first place.
+    """
     import urllib.request
 
-    resp = _stub_response(b'{"something": "else"}')
+    resp = _stub_response(b"<html><body>not mg</body></html>")
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: resp())
 
     assert mg_server._mg_already_serving("127.0.0.1", 9140) is False
@@ -196,7 +202,17 @@ def test_mg_already_serving_rejects_a_non_mg_server(monkeypatch):
 def test_mg_already_serving_accepts_an_mg_response(monkeypatch):
     import urllib.request
 
-    resp = _stub_response(b'{"ok": true, "chat": [], "hist": []}')
+    resp = _stub_response(b'<head><script>window.__HERMES_SESSION_TOKEN__="x";</script>')
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: resp())
+
+    assert mg_server._mg_already_serving("127.0.0.1", 9140) is True
+
+
+def test_mg_already_serving_accepts_the_page_title_as_a_fallback_signal(monkeypatch):
+    """A token-less mg build (or a page load before the token script) still counts."""
+    import urllib.request
+
+    resp = _stub_response(b"<title>Model Gruplar\xc4\xb1 \xe2\x80\x94 Hermes</title>")
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: resp())
 
     assert mg_server._mg_already_serving("127.0.0.1", 9140) is True
@@ -205,16 +221,7 @@ def test_mg_already_serving_accepts_an_mg_response(monkeypatch):
 def test_mg_already_serving_rejects_non_200(monkeypatch):
     import urllib.request
 
-    resp = _stub_response(b'{"chat": []}', status=503)
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: resp())
-
-    assert mg_server._mg_already_serving("127.0.0.1", 9140) is False
-
-
-def test_mg_already_serving_rejects_unparseable_body(monkeypatch):
-    import urllib.request
-
-    resp = _stub_response(b"<html>not json</html>")
+    resp = _stub_response(b"__HERMES_SESSION_TOKEN__", status=503)
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: resp())
 
     assert mg_server._mg_already_serving("127.0.0.1", 9140) is False

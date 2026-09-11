@@ -5,32 +5,28 @@ Serves ONLY the ``hermes_cli.web_routers.model_groups`` router (the
 a model catalog + ordered cascade groups + per-model role tags + a chat
 box that runs prompts through ``cli.py --oneshot`` with the chosen group.
 
-Unlike ``hermes dashboard`` this has no React build step and no token/
-session auth gate — it is bound to 127.0.0.1 and meant for a single
-trusted local operator. Any local process can reach it while it runs;
-stop it with Ctrl+C.
-
-Absence of a token gate does not mean absence of a boundary, though: a
-Host-header check is still required (see ``_loopback_host_middleware``
-below), the same defense ``hermes dashboard`` applies to its own ``/mg``
-mount (``hermes_cli.web_server.host_header_middleware``). Without it, DNS
-rebinding lets an attacker-controlled external page — resolved to
-127.0.0.1 after its DNS TTL expires — issue same-origin-looking requests
-here: unauthenticated POST /gorev starts a real agent process in a
-caller-chosen working directory (optionally with ``auto_escalate``, which
-skips the fallback-approval gate for that run), POST /onay approves a
-pending escalation, and POST /dosya-yukle writes into
-HERMES_HOME/girdiler/ — arbitrary local code execution under the
-operator's own account for any caller that can reach this port at all.
-Confirmed live (2026-09-11 security audit task): this port answered a
-request carrying ``Host: evil.test`` with 200; ``hermes dashboard``'s own
-``/mg`` mount already rejects the identical request with 400 at the Host
-layer.
+Unlike ``hermes dashboard`` this has no React build step, but it is NOT
+unauthenticated: a per-process session token (minted at startup, embedded
+into the page, required on every ``/api/*`` call — see
+``_token_auth_middleware``) plus a Host-header check
+(``_loopback_host_middleware``) apply the same two defenses ``hermes
+dashboard`` already applies to its own ``/mg`` mount
+(``hermes_cli.web_server._has_valid_session_token`` /
+``host_header_middleware``). Earlier builds shipped with neither: a
+2026-09-11 security audit found this port would run an unauthenticated
+POST /gorev as a real agent process in a caller-chosen working directory
+(optionally with ``auto_escalate``, skipping the fallback-approval gate
+for that run), approve a pending escalation via POST /onay, or write into
+HERMES_HOME/girdiler/ via POST /dosya-yukle — for ANY request reaching
+the port, DNS-rebound or not. Both gaps are closed now; see the page +
+API routes and their tests for the current behaviour.
 """
 
 from __future__ import annotations
 
+import hmac
 import re
+import secrets
 import sys
 
 from hermes_cli.port_probe import (
@@ -38,6 +34,38 @@ from hermes_cli.port_probe import (
     is_addr_in_use_error,
     port_bind_conflict,
 )
+
+# Minted fresh every process start (never persisted, dies with the process —
+# same lifetime hermes_cli.web_server._SESSION_TOKEN has for the dashboard).
+# Embedded into the page HTML (model_groups._mg_page_html, via
+# STANDALONE_SESSION_TOKEN below) so a browser tab that loaded the real page
+# already carries it on every subsequent API call; nothing else does.
+_SESSION_TOKEN = secrets.token_urlsafe(32)
+_SESSION_HEADER_NAME = "X-Hermes-Session-Token"
+# Only /api/* needs the token: /mg and /model-groups must stay reachable
+# without one, or a browser could never load the page that hands the token
+# out in the first place.
+_TOKEN_REQUIRED_PREFIX = "/api/"
+
+
+def _has_valid_session_token(request) -> bool:
+    supplied = request.headers.get(_SESSION_HEADER_NAME, "")
+    return bool(supplied) and hmac.compare_digest(supplied.encode(), _SESSION_TOKEN.encode())
+
+
+async def _token_auth_middleware(request, call_next):
+    """Require the per-process session token on every /api/* call.
+
+    Runs after (i.e. registered before, since Starlette middleware wraps in
+    registration order — see ``run_server``) ``_loopback_host_middleware``,
+    so a request has already proven it isn't a DNS-rebinding attempt before
+    this even looks at its token.
+    """
+    from starlette.responses import JSONResponse
+
+    if request.url.path.startswith(_TOKEN_REQUIRED_PREFIX) and not _has_valid_session_token(request):
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
 
 # This server is always loopback-bound (see module docstring), so — unlike
 # hermes_cli.web_server's host_header_middleware, which also has to accept
@@ -107,7 +135,18 @@ def run_server(host: str = "127.0.0.1", port: int = 9140, *, open_browser: bool 
         print(f"hermes mg: gerekli modüller yüklenemedi: {exc}", file=sys.stderr)
         return 1
 
+    _mg.STANDALONE_SESSION_TOKEN = _SESSION_TOKEN
+
     app = FastAPI(title="Hermes — Model Grupları")
+    # Starlette wraps in reverse registration order — the LAST middleware
+    # registered runs OUTERMOST, i.e. first on the way in (verified against
+    # this exact FastAPI version in tests/hermes_cli/test_mg_server_host_check.py,
+    # since Starlette has flipped this convention across versions before).
+    # Registering the host check last therefore puts it outside the token
+    # check, so a spoofed-Host request is rejected before the token is even
+    # looked at — no timing signal about token validity leaks to an attacker
+    # who hasn't already gotten past the Host layer.
+    app.middleware("http")(_token_auth_middleware)
     app.middleware("http")(_loopback_host_middleware)
     app.include_router(_mg.router)
 
@@ -166,20 +205,27 @@ def _handle_port_taken(host: str, port: int, url: str) -> int:
 
 
 def _mg_already_serving(host: str, port: int, timeout: float = 3.0) -> bool:
-    """True when something at ``host:port`` answers as an mg server."""
-    import json
+    """True when something at ``host:port`` answers as an mg server.
+
+    Checks ``/mg`` rather than an ``/api/*`` route on purpose: the page
+    itself is the one endpoint every mg server answers without the session
+    token (it has to be, or a browser could never load the page that hands
+    the token out — see ``_TOKEN_REQUIRED_PREFIX``), so this stays an
+    unauthenticated, no-credential probe rather than needing a token it has
+    no way to already know.
+    """
     import urllib.error
     import urllib.request
 
-    url = f"http://{host}:{port}/api/model-groups/sohbet"
+    url = f"http://{host}:{port}/mg"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             if resp.status != 200:
                 return False
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            body = resp.read(4096).decode("utf-8", errors="replace")
     except (urllib.error.URLError, OSError, ValueError):
         return False
-    return isinstance(payload, dict) and "chat" in payload
+    return "__HERMES_SESSION_TOKEN__" in body or "Model Grupları" in body
 
 
 def _report_port_conflict(host: str, port: int) -> None:

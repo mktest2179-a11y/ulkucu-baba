@@ -38,6 +38,14 @@ from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
+# Set by hermes_cli.mg_server at process start when this router is mounted
+# standalone (``hermes mg``, port 9140) rather than under the dashboard.
+# There, hermes_cli.web_server._SESSION_TOKEN is the real gate and already
+# enforces it (see _mg_page_html below); the standalone process has no such
+# layer, so it mints and checks its own token via this module-level slot
+# rather than importing the ~20k-line dashboard module for one value.
+STANDALONE_SESSION_TOKEN: Optional[str] = None
+
 _LOCK = threading.Lock()
 
 # Sentinel profile key for "the home this dashboard process runs as".
@@ -1121,13 +1129,15 @@ def _mg_page_html() -> str:
     SPA kendi HTML'ine gömülü token'ı yolluyor ama mg sayfası ayrı HTML
     olduğu için ona da gömmek gerekir, yoksa dosya yükleme vb. 401 yer.
     """
-    try:
-        from hermes_cli import web_server as _ws
+    tok = STANDALONE_SESSION_TOKEN
+    if not tok:
+        try:
+            from hermes_cli import web_server as _ws
 
-        tok = getattr(_ws, "_SESSION_TOKEN", "")
-        if tok:
-            head = f'<script>window.__HERMES_SESSION_TOKEN__="{tok}";</script>'
-            return _PAGE.replace("<head>", "<head>" + head, 1)
-    except Exception:
-        pass
+            tok = getattr(_ws, "_SESSION_TOKEN", "")
+        except Exception:
+            tok = ""
+    if tok:
+        head = f'<script>window.__HERMES_SESSION_TOKEN__="{tok}";</script>'
+        return _PAGE.replace("<head>", "<head>" + head, 1)
     return _PAGE
