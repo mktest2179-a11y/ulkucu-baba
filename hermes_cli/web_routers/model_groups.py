@@ -785,9 +785,9 @@ let PF='current', CAT=[], CHOSEN=[], DATA={groups:{},active:''};
 let CHAT=JSON.parse(localStorage.getItem('mg_chat')||'[]');
 let HIST=JSON.parse(localStorage.getItem('mg_hist')||'[]');
 const saveChat=()=>{localStorage.setItem('mg_chat',JSON.stringify(CHAT));
-  try{fetch('/api/model-groups/sohbet',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat:CHAT,hist:HIST})}).catch(()=>{})}catch(e){}};
+  try{j('/api/model-groups/sohbet',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat:CHAT,hist:HIST})}).catch(()=>{})}catch(e){}};
 const saveHist=()=>{localStorage.setItem('mg_hist',JSON.stringify(HIST));
-  try{fetch('/api/model-groups/sohbet',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat:CHAT,hist:HIST})}).catch(()=>{})}catch(e){}};
+  try{j('/api/model-groups/sohbet',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat:CHAT,hist:HIST})}).catch(()=>{})}catch(e){}};
 
 $('#tabChat').onclick=()=>{$('#tabChat').classList.add('on');$('#tabGroups').classList.remove('on');$('#viewChat').classList.add('on');$('#viewGroups').classList.remove('on')};
 $('#tabGroups').onclick=()=>{$('#tabGroups').classList.add('on');$('#tabChat').classList.remove('on');$('#viewGroups').classList.add('on');$('#viewChat').classList.remove('on')};
