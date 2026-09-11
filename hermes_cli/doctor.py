@@ -3173,7 +3173,28 @@ def run_doctor(args):
         with _futures.ThreadPoolExecutor(max_workers=8,
                                          thread_name_prefix="doctor-probe") as _ex:
             _futures_in_order = [_ex.submit(_fn) for _, _fn in _probes]
-            _results = [_f.result() for _f in _futures_in_order]
+            # Every _probe_* is documented as a pure function that returns a
+            # _ConnectivityResult and never raises — but a plain list
+            # comprehension over .result() takes that on faith: the FIRST
+            # probe to violate it (an SDK raising a type this file's own
+            # try/except didn't anticipate, a future dependency update
+            # changing what a library throws) aborts the comprehension right
+            # there, and every result after it — successes included — never
+            # prints. Users saw exactly that: "Running 40 checks…" and
+            # nothing else. Collecting with per-future error handling means
+            # one bad probe reports itself as failed instead of hiding the
+            # other 39.
+            _results = []
+            for _label, _f in zip((label for label, _ in _probes), _futures_in_order):
+                try:
+                    _results.append(_f.result())
+                except Exception as _probe_exc:
+                    _results.append(_ConnectivityResult(
+                        _label,
+                        [(color("✗", Colors.RED), _label,
+                          color(f"(probe crashed: {_probe_exc})", Colors.DIM))],
+                        [],
+                    ))
     finally:
         if _imds_prev is None:
             os.environ.pop("AWS_EC2_METADATA_DISABLED", None)
@@ -3182,7 +3203,18 @@ def run_doctor(args):
 
     # Clear the "Running …" line and print all results in submission order.
     print("\r" + " " * 70 + "\r", end="")
+    _skipped_unconfigured = 0
     for _r in _results:
+        if not _r.lines:
+            # _probe_apikey_provider returns no lines at all for a provider
+            # with no key set — deliberate, so a 40-provider matrix doesn't
+            # print ~36 grey "not configured" rows for providers nobody
+            # uses. Left unaccounted for, though, "Running 40 connectivity
+            # checks…" followed by 1-2 visible results reads as broken, not
+            # quiet — that gap is exactly what a 2026-09-11 audit flagged.
+            # Tally them instead of adding to the noise back.
+            _skipped_unconfigured += 1
+            continue
         for _glyph, _label, _detail in _r.lines:
             if _detail:
                 print(f"  {_glyph} {_label} {_detail}")
@@ -3193,6 +3225,8 @@ def run_doctor(args):
             _issues_to_add = []
         for _issue in _issues_to_add:
             issues.append(_issue)
+    if _skipped_unconfigured:
+        print(f"  {color(f'({_skipped_unconfigured} more providers skipped — no API key configured)', Colors.DIM)}")
 
     _section("Tool Availability")
     try:

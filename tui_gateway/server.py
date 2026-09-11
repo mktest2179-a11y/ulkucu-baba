@@ -2234,6 +2234,21 @@ def _start_backend_heartbeat_refresher() -> None:
         if _heartbeat_refresher_started:
             return
         _heartbeat_refresher_started = True
+    # Sweep rows a predecessor never cleaned up. _atexit_clear() below only
+    # runs on a graceful exit; a crash or a force-kill (SIGKILL, a Windows
+    # `Stop-Process -Force`, an OOM kill) skips atexit entirely and leaves
+    # that backend's row behind forever — nothing else in this table's
+    # lifecycle ever deletes it. The read-time query in sweep_orphaned_
+    # sessions() already ignores rows this old, so a stale row was never a
+    # correctness bug, just unbounded growth. 24h is many multiples of
+    # _HEARTBEAT_REFRESH_S (60s default): long enough that a live backend
+    # is never mistakenly swept, short enough that dead ones don't linger.
+    db = _get_db()
+    if db is not None:
+        try:
+            db.prune_stale_heartbeats(max_age_seconds=86400.0)
+        except Exception:
+            logger.debug("stale heartbeat sweep failed", exc_info=True)
     # Write a row synchronously so the sweep run later in this same
     # process can see ourselves in the heartbeat table too.  Without
     # this, exclude_ids would have to cover every local session — a

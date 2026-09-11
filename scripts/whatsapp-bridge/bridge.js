@@ -267,6 +267,33 @@ let lidToPhone = buildLidMap();
 
 const logger = pino({ level: 'warn' });
 
+// The Python adapter's crash report ("WhatsApp bridge process exited
+// unexpectedly (code N)") only ever carries the OS exit code — with no
+// handler here, any uncaught exception or unhandled promise rejection
+// (a Baileys internal error, a native crypto module fault, ...) is
+// reported by Node's own default handler straight to stderr, which is not
+// captured anywhere durable. The next occurrence is exactly as opaque as
+// the last one: "code 7" and nothing else. These two handlers log the
+// actual error through the same pino logger that already writes to
+// bridge.log, THEN exit explicitly — registering either handler at all
+// cancels Node's own default "print and exit(1)" behaviour, so without an
+// explicit exit() here the process would be left running past an error it
+// never recovers from (open sockets, a half-torn-down Baileys session)
+// instead of cleanly crashing for the adapter's already-working retryable
+// restart (_check_managed_bridge_exit, retryable=True) to pick up. Exit
+// code 1 (not the original crash's code, which Node no longer reports
+// once a handler exists) still reads as "died" to that adapter check —
+// only the OS exit code, not this file, is where the adapter branches on
+// clean-vs-crash, so this doesn't change that path's behaviour.
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'uncaught exception — bridge is exiting');
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ err: reason }, 'unhandled promise rejection — bridge is exiting');
+  process.exit(1);
+});
+
 // Message queue for polling
 const messageQueue = [];
 const MAX_QUEUE_SIZE = 100;
