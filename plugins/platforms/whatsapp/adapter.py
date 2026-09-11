@@ -1431,9 +1431,32 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         
         return {"name": chat_id, "type": "dm"}
     
+    # Consecutive connection-shaped poll failures before an UNMANAGED bridge
+    # (see below) is declared dead. 3 failures, each preceded by the 5s sleep
+    # in the except branch, is ~10-15s of confirmed unreachability — long
+    # enough that one network blip can't false-trigger a reconnect storm,
+    # short enough that WhatsApp doesn't sit silently dead for minutes.
+    _UNMANAGED_BRIDGE_DEAD_THRESHOLD = 3
+
     async def _poll_messages(self) -> None:
         """Poll the bridge for incoming messages."""
         import aiohttp
+
+        # Tracks consecutive connection-shaped failures for the case
+        # _check_managed_bridge_exit() structurally cannot cover: when this
+        # adapter instance ADOPTED an already-running bridge from a previous
+        # gateway life (the "Using existing bridge" reuse path in connect())
+        # rather than spawning it, self._bridge_process is None — so
+        # `.poll()` has nothing to check and _check_managed_bridge_exit()
+        # returns None unconditionally, forever, no matter how dead that
+        # bridge actually is. Without this counter an adopted bridge dying
+        # mid-session was invisible: the loop below just printed "Poll
+        # error" and slept every 5s, never reaching the retryable
+        # fatal-error path that queues a reconnect — confirmed live
+        # (2026-09-11/12): WhatsApp stayed down for minutes after the bridge
+        # process was killed, with zero gateway-log activity, until a full
+        # gateway restart forced a fresh connect() attempt.
+        _unreachable_streak = 0
 
         while self._running:
             if not self._http_session:
@@ -1448,6 +1471,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status == 200:
+                        _unreachable_streak = 0
                         messages = await resp.json()
                         for msg_data in messages:
                             event = await self._build_message_event(msg_data)
@@ -1467,9 +1491,35 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 if bridge_exit:
                     print(f"[{self.name}] {bridge_exit}")
                     break
+                # Only count exceptions that mean "nothing answered" — a
+                # JSON decode hiccup or an unrelated bug in handling one
+                # message is not evidence the bridge process is gone, and
+                # must not queue an unnecessary reconnect.
+                if isinstance(e, (
+                    aiohttp.ClientConnectorError,
+                    ConnectionRefusedError,
+                    asyncio.TimeoutError,
+                )):
+                    _unreachable_streak += 1
+                else:
+                    _unreachable_streak = 0
+                if _unreachable_streak >= self._UNMANAGED_BRIDGE_DEAD_THRESHOLD:
+                    message = (
+                        f"WhatsApp bridge unreachable after "
+                        f"{_unreachable_streak} consecutive poll failures."
+                    )
+                    if not self.has_fatal_error:
+                        logger.error("[%s] %s", self.name, message)
+                        self._set_fatal_error(
+                            "whatsapp_bridge_unreachable", message, retryable=True
+                        )
+                        self._close_bridge_log()
+                        await self._notify_fatal_error()
+                    print(f"[{self.name}] {self.fatal_error_message or message}")
+                    break
                 print(f"[{self.name}] Poll error: {e}")
                 await asyncio.sleep(5)
-            
+
             await asyncio.sleep(1)  # Poll interval
 
     async def _send_read_receipt(self, data: Dict[str, Any]) -> None:
