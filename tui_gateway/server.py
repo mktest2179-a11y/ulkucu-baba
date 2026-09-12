@@ -18515,9 +18515,11 @@ from . import (  # noqa: E402
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
     methods_tools as _methods_tools,
+    session_lifecycle as _session_lifecycle,
 )
 
 for _m in (
+    _session_lifecycle,
     _methods_browser_control,
     _methods_session,
     _methods_prompt,
