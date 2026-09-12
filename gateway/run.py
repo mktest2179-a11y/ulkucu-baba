@@ -2309,10 +2309,10 @@ def _home_target_env_var(platform_name: str) -> str:
     """Return the configured home-target env var for a platform.
 
     Consults built-in ``_HOME_TARGET_ENV_VARS`` first, then the plugin
-    registry via ``cron.scheduler._resolve_home_env_var``, then falls back
-    to ``<PLATFORM>_HOME_CHANNEL`` for unknown names.
+    registry via ``cron.scheduler_delivery._resolve_home_env_var``, then falls
+    back to ``<PLATFORM>_HOME_CHANNEL`` for unknown names.
     """
-    from cron.scheduler import _resolve_home_env_var
+    from cron.scheduler_delivery import _resolve_home_env_var
 
     resolved = _resolve_home_env_var(platform_name)
     if resolved:
