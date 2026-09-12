@@ -266,6 +266,38 @@ def _normalize_notice_delivery(value: Any, default: str = "public") -> str:
     return default
 
 
+def _dict_slot(container: dict, key: str) -> dict:
+    """Get-or-create ``container[key]`` as a dict for in-place mutation.
+
+    Coerces a non-dict value at that key to ``{}`` (matching
+    ``_ensure_platform_extra_dict``'s two manual setdefault+type-check
+    blocks below, generalized to any single key) so callers can chain
+    writes — ``_dict_slot(_dict_slot(d, "a"), "b")`` — without a type
+    check at each level.
+    """
+    value = container.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        container[key] = value
+    return value
+
+
+def _normalize_choice(value: Any, allowed: set, default: str) -> str:
+    """Normalize ``value`` to one of ``allowed`` (case-insensitive), else ``default``.
+
+    The shared form of the exact logic ``_normalize_unauthorized_dm_behavior``
+    and ``_normalize_notice_delivery`` above each inline for their own choice
+    set — kept as a separate helper (not refactored into those two) so this
+    fix stays scoped to restoring the missing import, not touching working
+    call sites.
+    """
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in allowed:
+            return normalized
+    return default
+
+
 def _ensure_platform_extra_dict(platforms_data: dict, name: str) -> tuple[dict, dict]:
     """Get-or-create ``platforms_data[name]`` and its nested ``extra`` dict.
 
