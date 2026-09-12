@@ -17823,7 +17823,8 @@ async def pty_ws(ws: WebSocket) -> None:
                 session.bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
                 continue
 
-            session.bridge.write(raw)
+            if not await session.bridge.write(raw):
+                _log.warning("pty write failed (bridge closed/full); dropping input")
     except WebSocketDisconnect:
         pass
     finally:
