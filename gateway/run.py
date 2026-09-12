@@ -31264,7 +31264,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 message_type=message_type,
             )
 
-    def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
+    def _profile_name_for_source(
+        self, source: SessionSource, adapter_profile: Optional[str] = None,
+    ) -> Optional[str]:
         """Resolve the profile name for an inbound source via configured routes.
 
         Returns ``None`` when multiplexing is off, no routes are configured, or
@@ -31280,6 +31282,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         multiplexing. Without this gate, a configured route with multiplexing
         off would namespace batch/session keys by profile while the agent
         still runs in ``agent:main``, splitting the two out of agreement.
+
+        ``adapter_profile`` is the profile owning the receiving bot; only
+        routes declaring it as ``bot_profile`` apply (#104933).
         """
         config = getattr(self, "config", None)
         if not getattr(config, "multiplex_profiles", False):
@@ -31287,6 +31292,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         routes = getattr(config, "profile_routes", None)
         if not routes:
             return None
+        if adapter_profile is None:
+            # Sources built outside ``build_source`` may still carry the receiving adapter as provenance.
+            owner = self._transport_owner(source) if callable(getattr(source, "_transport_adapter_ref", None)) else None
+            if isinstance(owner, tuple):
+                adapter_profile = owner[1]
         from gateway.profile_routing import ProfileRouteRejected, match_profile_route
         try:
             matched = match_profile_route(
@@ -31296,6 +31306,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 chat_id=source.chat_id,
                 thread_id=getattr(source, "thread_id", None),
                 parent_chat_id=getattr(source, "parent_chat_id", None),
+                adapter_profile=adapter_profile,
             )
         except Exception:
             logger.warning(
