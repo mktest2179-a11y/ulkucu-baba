@@ -90,4 +90,4 @@ def _(rid, params):
 
 
 def register(server):
-    bind_module(globals(), server)
+    bind_module(globals(), server, skip=("_",))

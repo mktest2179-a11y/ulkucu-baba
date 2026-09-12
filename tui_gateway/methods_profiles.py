@@ -655,4 +655,4 @@ def _(rid, params: dict) -> dict:
 
 
 def register(server) -> None:
-    bind_module(globals(), server)
+    bind_module(globals(), server, skip=("_",))
