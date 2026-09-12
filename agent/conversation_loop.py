@@ -2187,6 +2187,7 @@ def run_conversation(
     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
     persist_user_platform_id: Optional[str] = None,
     moa_config: Optional[dict[str, Any]] = None,
+    turn_author: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
