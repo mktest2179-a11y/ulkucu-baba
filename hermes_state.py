@@ -1542,3 +1542,166 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+# --- fork portaj: paylasilan oturum DB tekil degiskenleri ---
+def _wal_reset_repair_hint() -> str:
+    """Return a context-appropriate hint for repairing the SQLite runtime.
+
+    Uses the codebase's install-type detection so the hint matches what
+    ``hermes update`` can actually do for this install (#75153).
+    """
+    try:
+        from hermes_cli.config import (
+            detect_install_method,
+            recommended_update_command_for_method,
+            get_project_root,
+        )
+        method = detect_install_method(get_project_root())
+        cmd = recommended_update_command_for_method(method)
+        if method in {"git", "unknown"}:
+            return f"Hermes-managed installs can repair the embedded runtime with `{cmd}`"
+        if method == "docker":
+            return f"update the container image with `{cmd}`"
+        # nix/nixos
+        return cmd
+    except Exception:
+        pass
+    return (
+        "install a Python build bundled with SQLite 3.51.3+ "
+        "(or backports 3.50.7 / 3.44.6) and restart Hermes"
+    )
+
+def _db_opens_cleanly(db_path: Path) -> Optional[str]:
+    """Probe a DB on a fresh connection. Returns None if healthy, else a reason.
+
+    Runs the same first-statement (``PRAGMA journal_mode``) that trips the
+    malformed-schema parse, then ``PRAGMA integrity_check`` and a canonical
+    ``sessions`` read, and finally a rolled-back ``messages`` write so that
+    FTS5 index corruption — which leaves base-table reads and
+    ``integrity_check`` passing while every ``INSERT INTO messages`` fails
+    through the FTS triggers — is reported as unhealthy rather than slipping
+    past as a false "ok" (#50502).
+    """
+    conn = _connect_repair_durable(db_path)
+    try:
+        # Best-effort tokenizer load: a DB carrying the messages_fts_cjk
+        # index needs the cjk_unicode61 extension before any statement can
+        # touch that table — including the trigger-driven write probe below.
+        # Without it, this probe sees the DB exactly as a tokenizer-less
+        # SessionDB open would (which drops the cjk triggers to keep writes
+        # working), so tokenizer absence must never classify as corruption.
+        load_fts5_cjk_extension(conn)
+        conn.execute("PRAGMA journal_mode").fetchone()
+        rows = conn.execute("PRAGMA integrity_check").fetchall()
+        problems = [str(r[0]) for r in rows if r and str(r[0]).lower() != "ok"]
+        if problems:
+            return "; ".join(problems[:3])
+        conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+
+        # FTS5 read probe: run a representative MATCH query against the
+        # messages_fts* virtual tables. The FTS *write* probe below catches
+        # the corruption class where base tables read fine but writes fail
+        # through the triggers (#50502). It does NOT catch partial FTS5
+        # index corruption — bad shadow-table segments where reads still
+        # parse but MATCH / snippet / rank queries error out with
+        # "database disk image is malformed" (a `sqlite3.DatabaseError`,
+        # not `OperationalError`). session_search, /resume title resolution,
+        # and any feature relying on FTS5 discovery then break silently
+        # because the official repair tool's check-only path reports the
+        # DB as healthy. #66724.
+        # Catch the full sqlite3 exception hierarchy (not just
+        # OperationalError) so the malformed-shadow-table class is reported
+        # rather than letting it crash the caller.
+        for fts_table in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"):
+            try:
+                # No-op queries against the actual FTS5 APIs the search
+                # tools use. The trigram table is included because it backs
+                # the title-resolution path; either corruption mode would
+                # break session recall without this probe. MATCH '""' is
+                # the empty phrase-token probe — FTS5 rejects MATCH ''
+                # outright ("fts5: syntax error"), but a quoted empty
+                # phrase parses, scans zero rows, and exercises the same
+                # shadow-table read path the search tools use.
+                conn.execute(
+                    f"SELECT 1 FROM {fts_table} WHERE {fts_table} MATCH '\"\"' LIMIT 1"
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                # Use the canonical capability classifier instead of a
+                # hand-rolled substring check. On SQLite builds without the
+                # fts5 module, the legacy messages_fts table may exist on
+                # disk (from a prior build that had FTS5) and MATCH queries
+                # against it raise OperationalError("no such module: fts5");
+                # the substring check below would misclassify that as
+                # corruption and send the DB into the repair path, whose
+                # final fallback deletes the messages_fts% schema
+                # (hermes_state.py:645-723). The supported degraded-runtime
+                # path (SessionDB._is_fts5_unavailable_error + the
+                # regression suite in tests/test_hermes_state.py:600-632)
+                # treats both "no such module: fts5" and
+                # "no such tokenizer: trigram" as the capability error.
+                if SessionDB._is_fts5_unavailable_error(exc):
+                    # Degraded runtime — not the corruption class we probe.
+                    continue
+                msg = str(exc).lower()
+                if "no such table" in msg or "no such column" in msg:
+                    # FTS5 not built yet (brand new file mid-init) — not the
+                    # corruption class we probe.
+                    continue
+                return f"fts5 read probe failed on {fts_table}: {exc}"
+            except sqlite3.DatabaseError as exc:
+                # This is the corruption class #66724 actually wants caught:
+                # partial shadow-table damage where MATCH / snippet / rank
+                # queries raise DatabaseError("database disk image is malformed")
+                # while reads of the FTS5 table itself parse fine.
+                return f"fts5 read probe failed on {fts_table}: {exc}"
+
+        # FTS write probe: drive a row through the messages_fts* triggers in a
+        # transaction that is always rolled back, so a corrupt FTS index that
+        # rejects writes is caught even though reads look healthy. The probe is
+        # best-effort — if the messages/sessions tables don't exist yet (brand
+        # new file mid-init) the OperationalError is treated as "not yet a
+        # populated DB", not corruption.
+        probe_session_id = f"_hermes_fts_health_probe_{time.time_ns()}"
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+                (probe_session_id, "_health_probe", time.time()),
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                (probe_session_id, "user", "_fts_health_probe", time.time()),
+            )
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError as exc:
+            # Missing tables / FTS disabled — not the corruption class we probe.
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            msg = str(exc).lower()
+            if "no such table" in msg or "no such column" in msg:
+                return None
+            if "no such tokenizer: cjk_unicode61" in msg:
+                # This probe process couldn't load the cjk extension while
+                # the DB carries the cjk index — capability gap, not
+                # corruption. A tokenizer-capable SessionDB serves it fine;
+                # a tokenizer-less one self-heals by dropping the triggers.
+                return None
+            return str(exc)
+        return None
+    except sqlite3.DatabaseError as exc:
+        return str(exc)
+    finally:
+        conn.close()
+
+
+# --- fork portaj: registry re-export (merge'de silinmisti) ---
+from hermes_state_registry import (  # noqa: F401  (re-export)
+    close_shared_session_dbs,
+    get_shared_session_db,
+    release_or_close,
+    release_shared_session_db,
+)
