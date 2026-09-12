@@ -45,6 +45,7 @@ from tui_gateway.turn_marker import (
     record_turn_start,
 )
 from tui_gateway.transport import (
+    FanoutTransport,
     StdioTransport,
     Transport,
     bind_transport,
